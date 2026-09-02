@@ -26,9 +26,9 @@ The installed command exposes its available options through standard CLI help:
 uv run modgud --help
 ```
 
-Adding a web page extracts and summarizes it immediately. Regenerate the
-current tier-1 artifact for an extracted web item by id when changing models or
-prompts:
+Adding a web page extracts and summarizes it immediately. Generate the tier-1
+artifact for a stored YouTube transcript, or regenerate any supported extracted
+item after changing models or prompts, by id:
 
 ```console
 uv run modgud summarize 42
@@ -160,14 +160,16 @@ uv run pytest
 root as `sha256/<first-two-hex>/<full-sha256>`. The full digest remains visible
 in every filename, while the two-character directory keeps large stores easy
 to browse. On each SQLite item, `content_hash` references the raw blob and the
-nullable `extracted_text_hash` references extracted text when available.
+nullable `extracted_text_hash` references extracted text or a timestamped
+transcript when available.
 `duration_seconds` retains audio/video metadata, while the nullable
 `time_to_value_seconds` stores the digest-ready estimate. Text estimates use
 the extracted text at 200 words per minute; audio/video estimates use duration,
 and missing inputs leave the estimate unknown. The current tier-1 artifact is
 stored in `tier_1_summaries` as a separate one-liner and JSON claim array;
-regeneration replaces that row while append-only events retain generation
-history.
+long transcripts are summarized through the shared timestamped chunker before
+their chunk summaries are combined. Regeneration replaces the artifact row
+while append-only events retain generation history.
 
 ## Shape
 
