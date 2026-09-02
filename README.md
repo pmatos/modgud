@@ -34,6 +34,27 @@ prompts:
 uv run modgud summarize 42
 ```
 
+Retrieve inbound email with the same one-shot command used by the systemd
+service:
+
+```console
+POSTMARK_SERVER_TOKEN=... uv run modgud poll-inbound
+```
+
+The command does not run a loop or expose a listener. A systemd timer starts it
+periodically, and the command uses `[inbound].poll_interval_seconds` from the
+operator config to skip timer ticks that arrive before the next poll is due.
+Configure the timer's wake-up cadence at or below that interval. For an
+operator-requested poll regardless of the last successful run, use
+`modgud poll-inbound --force`.
+
+Each poll searches processed inbound messages, retrieves the full details for
+unseen Postmark message IDs, and places their JSON in the durable SQLite inbound
+queue. The message-ID primary key acts as a durable cursor, so restarts and
+overlapping searches do not enqueue the same email twice. Search and detail API
+calls retry with bounded exponential backoff; the last successful poll time is
+only advanced after the complete search succeeds.
+
 ## Configuration
 
 modgud reads one TOML file at process startup. Copy the committed example to

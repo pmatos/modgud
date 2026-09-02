@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sqlite3
+from datetime import UTC, datetime
 from http.client import HTTPException
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -14,6 +15,7 @@ from modgud.config import ConfigError, Settings, default_config_path, get_settin
 from modgud.database import connect
 from modgud.extraction import ExtractionError, extract_web_page
 from modgud.formats import ItemFormat, detect_format
+from modgud.inbound import PostmarkClient, poll_inbound
 from modgud.podcasts import (
     PodcastEpisode,
     PodcastFeedError,
@@ -472,17 +474,45 @@ def main() -> None:
         help="generate or replace an item's tier-1 summary",
     )
     summarize_parser.add_argument("item_id", type=int)
+    poll_inbound_parser = subparsers.add_parser(
+        "poll-inbound",
+        help="retrieve new inbound messages from Postmark",
+    )
+    poll_inbound_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="poll now even when the configured interval has not elapsed",
+    )
 
     arguments = parser.parse_args()
     try:
         settings = get_settings(arguments.config)
     except ConfigError as error:
         parser.error(str(error))
+    postmark_server_token = settings.secrets.postmark_server_token
+    if arguments.command == "poll-inbound" and postmark_server_token is None:
+        parser.error(
+            "POSTMARK_SERVER_TOKEN is required to poll Postmark inbound messages"
+        )
     data_dir: Path = arguments.data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
     if arguments.command == "add":
         _add(data_dir, arguments.url, settings)
     elif arguments.command == "list":
         _list(data_dir)
-    else:
+    elif arguments.command == "summarize":
         _summarize(data_dir, arguments.item_id, settings)
+    else:
+        if postmark_server_token is None:
+            raise AssertionError("Postmark token was validated before dispatch")
+        result = poll_inbound(
+            data_dir / "modgud.sqlite3",
+            PostmarkClient(postmark_server_token),
+            poll_interval=settings.inbound_poll_interval,
+            now=datetime.now(UTC),
+            force=arguments.force,
+        )
+        if result.skipped:
+            print("Inbound poll is not due yet")
+        else:
+            print(f"Polled Postmark: {result.new_message_count} new inbound messages")
