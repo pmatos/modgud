@@ -13,6 +13,12 @@ from modgud.blobs import BlobStore
 from modgud.database import connect
 from modgud.extraction import ExtractionError, extract_web_page
 from modgud.formats import ItemFormat, detect_format
+from modgud.podcasts import (
+    PodcastEpisode,
+    PodcastFeedError,
+    discover_podcast_feed,
+    parse_podcast_feed,
+)
 from modgud.time_to_value import recompute_time_to_value
 from modgud.urls import canonicalize_url
 from modgud.youtube import ExtractedYouTube, extract_youtube
@@ -46,6 +52,7 @@ def _record_capture(
     url: str,
     canonical_url: str,
     fetch_error: str | None = None,
+    podcast: PodcastEpisode | None = None,
 ) -> None:
     fields = {
         "canonical_url": canonical_url,
@@ -54,6 +61,9 @@ def _record_capture(
     }
     if fetch_error is not None:
         fields["fetch_error"] = fetch_error
+    if podcast is not None:
+        fields["feed_url"] = podcast.feed_url
+        fields["guid"] = podcast.guid
     payload = json.dumps(
         fields,
         separators=(",", ":"),
@@ -176,6 +186,40 @@ def _add(data_dir: Path, url: str) -> None:
         fetch_error = None
     else:
         content, content_type, fetch_error = _fetch(url)
+    extracted_podcast = None
+    fetched_format = detect_format(
+        canonical_url,
+        content_type=content_type,
+        content=content,
+    )
+    if fetch_error is None:
+        try:
+            extracted_podcast = parse_podcast_feed(content, feed_url=canonical_url)
+        except PodcastFeedError:
+            pass
+        else:
+            canonical_url = extracted_podcast.canonical_url
+            content = extracted_podcast.raw_content
+    if (
+        extracted_podcast is None
+        and fetch_error is None
+        and fetched_format in {ItemFormat.PODCAST, ItemFormat.WEB}
+    ):
+        feed_url = discover_podcast_feed(content, page_url=canonical_url)
+        if feed_url is not None:
+            feed_content, _, feed_error = _fetch(feed_url)
+            if feed_error is None:
+                try:
+                    extracted_podcast = parse_podcast_feed(
+                        feed_content,
+                        feed_url=feed_url,
+                        episode_url=canonical_url,
+                    )
+                except PodcastFeedError:
+                    pass
+                else:
+                    canonical_url = extracted_podcast.canonical_url
+                    content = extracted_podcast.raw_content
     blob_store = BlobStore(data_dir / "blobs")
     content_hash = blob_store.put(content)
     item_format = detect_format(
@@ -194,10 +238,12 @@ def _add(data_dir: Path, url: str) -> None:
     extracted_text = None
     caption_language = None
     caption_kind = None
+    duration_seconds = None
     if extracted_youtube is not None:
         title = extracted_youtube.title
         channel = extracted_youtube.channel
         author = extracted_youtube.channel
+        duration_seconds = extracted_youtube.duration_seconds
         chapters = json.dumps(
             extracted_youtube.chapters,
             ensure_ascii=False,
@@ -211,6 +257,11 @@ def _add(data_dir: Path, url: str) -> None:
         if extracted_youtube.failure is not None:
             extraction_error = extracted_youtube.failure.reason
             extraction_error_stage = extracted_youtube.failure.stage
+    elif extracted_podcast is not None:
+        title = extracted_podcast.title
+        author = extracted_podcast.author
+        channel = extracted_podcast.podcast_title
+        duration_seconds = extracted_podcast.duration_seconds
     elif fetch_error is None and item_format is ItemFormat.WEB:
         try:
             extracted_page = extract_web_page(content, url=canonical_url)
@@ -234,7 +285,12 @@ def _add(data_dir: Path, url: str) -> None:
     else:
         item_state = "captured"
     try:
-        source = urlsplit(canonical_url).hostname or canonical_url
+        source_url = (
+            extracted_podcast.feed_url
+            if extracted_podcast is not None
+            else canonical_url
+        )
+        source = urlsplit(source_url).hostname or source_url
     except ValueError:
         source = canonical_url
     if extracted_site is not None:
@@ -262,6 +318,7 @@ def _add(data_dir: Path, url: str) -> None:
                 item_id=item_id,
                 url=url,
                 canonical_url=canonical_url,
+                podcast=extracted_podcast,
             )
             print(f"Existing item {item_id}: {existing_url}")
             return
@@ -292,9 +349,7 @@ def _add(data_dir: Path, url: str) -> None:
                 title,
                 author,
                 channel,
-                extracted_youtube.duration_seconds
-                if extracted_youtube is not None
-                else None,
+                duration_seconds,
                 chapters,
             ),
         )
@@ -307,6 +362,7 @@ def _add(data_dir: Path, url: str) -> None:
             url=url,
             canonical_url=canonical_url,
             fetch_error=fetch_error,
+            podcast=extracted_podcast,
         )
         if extracted_text_hash is not None:
             _record_extraction(
@@ -332,7 +388,11 @@ def _add(data_dir: Path, url: str) -> None:
                 item_id=inserted_item_id,
                 reason=extracted_youtube.caption_refusal.reason,
             )
-        if extracted_text_hash is not None or extracted_youtube is not None:
+        if (
+            extracted_text_hash is not None
+            or extracted_youtube is not None
+            or extracted_podcast is not None
+        ):
             recompute_time_to_value(
                 connection,
                 item_id=inserted_item_id,
