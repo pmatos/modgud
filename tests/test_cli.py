@@ -156,6 +156,27 @@ def test_add_extracts_a_web_post_and_records_its_metadata(tmp_path: Path) -> Non
     assert event_types == ["captured", "extracted"]
 
 
+def test_add_estimates_web_reading_time_from_extracted_text_not_markup(
+    tmp_path: Path,
+) -> None:
+    article = " ".join(f"article{position}" for position in range(200))
+    boilerplate = " ".join(f"navigation{position}" for position in range(1_000))
+    raw_content = (
+        f"<html><body><nav>{boilerplate}</nav>"
+        f"<article><p>{article}</p></article></body></html>"
+    ).encode()
+    with serve(raw_content, content_type="text/html") as (url, _):
+        result = run_modgud(tmp_path, "add", url)
+
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        estimate = connection.execute(
+            "SELECT time_to_value_seconds FROM items"
+        ).fetchone()[0]
+
+    assert result.returncode == 0, result.stderr
+    assert estimate == 60
+
+
 def test_add_records_web_extraction_failure_without_rejecting_capture(
     tmp_path: Path,
 ) -> None:

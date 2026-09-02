@@ -42,6 +42,10 @@ root as `sha256/<first-two-hex>/<full-sha256>`. The full digest remains visible
 in every filename, while the two-character directory keeps large stores easy
 to browse. On each SQLite item, `content_hash` references the raw blob and the
 nullable `extracted_text_hash` references extracted text when available.
+`duration_seconds` retains audio/video metadata, while the nullable
+`time_to_value_seconds` stores the digest-ready estimate. Text estimates use
+the extracted text at 200 words per minute; audio/video estimates use duration,
+and missing inputs leave the estimate unknown.
 
 ## Shape
 
