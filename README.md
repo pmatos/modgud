@@ -35,6 +35,14 @@ uv run mypy
 uv run pytest
 ```
 
+## Storage
+
+`BlobStore` keeps fetched bytes and UTF-8-encoded extracted text beneath its
+root as `sha256/<first-two-hex>/<full-sha256>`. The full digest remains visible
+in every filename, while the two-character directory keeps large stores easy
+to browse. On each SQLite item, `content_hash` references the raw blob and the
+nullable `extracted_text_hash` references extracted text when available.
+
 ## Shape
 
 - **In**: CLI, a LAN web drop box, email (Postmark inbound, polled).

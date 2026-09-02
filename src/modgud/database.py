@@ -3,8 +3,11 @@
 import sqlite3
 from pathlib import Path
 
-_MIGRATION = Path(__file__).with_name("migrations") / "001_initial.sql"
-_SCHEMA_VERSION = 1
+_MIGRATIONS = (
+    Path(__file__).with_name("migrations") / "001_initial.sql",
+    Path(__file__).with_name("migrations") / "002_extracted_text_blob.sql",
+)
+_SCHEMA_VERSION = len(_MIGRATIONS)
 
 
 def connect(database: str | Path) -> sqlite3.Connection:
@@ -25,4 +28,5 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
     if current_version >= _SCHEMA_VERSION:
         return
 
-    connection.executescript(_MIGRATION.read_text(encoding="utf-8"))
+    for migration in _MIGRATIONS[current_version:]:
+        connection.executescript(migration.read_text(encoding="utf-8"))
