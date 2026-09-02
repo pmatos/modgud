@@ -56,6 +56,42 @@ def test_items_store_identity_format_state_source_and_timestamps(
     )
 
 
+def test_items_store_extracted_web_metadata(tmp_path: Path) -> None:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url,
+                content_hash,
+                extracted_text_hash,
+                format,
+                state,
+                source,
+                title,
+                author
+            ) VALUES (?, ?, ?, 'web', 'extracted', ?, ?, ?)
+            """,
+            (
+                "https://example.com/article",
+                "a" * 64,
+                "b" * 64,
+                "Example Journal",
+                "A Useful Article",
+                "Ada Rivera",
+            ),
+        )
+        metadata = connection.execute(
+            "SELECT title, author, source, extracted_text_hash FROM items"
+        ).fetchone()
+
+    assert metadata == (
+        "A Useful Article",
+        "Ada Rivera",
+        "Example Journal",
+        "b" * 64,
+    )
+
+
 def test_item_state_is_limited_to_the_lifecycle(tmp_path: Path) -> None:
     allowed_states = (
         "captured",

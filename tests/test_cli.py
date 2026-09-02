@@ -101,7 +101,86 @@ def test_add_captures_one_item_and_its_raw_content(tmp_path: Path) -> None:
         listed.stdout.splitlines()[1],
     )
     assert len(listed.stdout.splitlines()) == 2
-    assert stored_blobs == [raw_content]
+    assert raw_content in stored_blobs
+
+
+def test_add_extracts_a_web_post_and_records_its_metadata(tmp_path: Path) -> None:
+    raw_content = b"""
+        <!doctype html>
+        <html>
+          <head>
+            <meta property="og:title" content="Keeping State Small">
+            <meta property="og:site_name" content="Engineering Notes">
+            <meta name="author" content="Sam Lee">
+          </head>
+          <body>
+            <nav>Home Products Pricing Sign in</nav>
+            <article>
+              <h1>Keeping State Small</h1>
+              <p>Small state spaces make failures easier to understand because
+              every transition has a limited number of possible outcomes.</p>
+              <p>Persisting those transitions as events leaves enough evidence
+              to explain what happened after the process has restarted.</p>
+              <div class="share">Share this article everywhere</div>
+            </article>
+            <footer>Terms Privacy Careers</footer>
+          </body>
+        </html>
+    """
+    with serve(raw_content, content_type="text/html; charset=utf-8") as (url, _):
+        result = run_modgud(tmp_path, "add", url)
+
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item = connection.execute(
+            """
+            SELECT extracted_text_hash, state, title, author, source
+            FROM items
+            """
+        ).fetchone()
+        event_types = [
+            row[0] for row in connection.execute("SELECT type FROM events ORDER BY id")
+        ]
+
+    assert result.returncode == 0, result.stderr
+    assert item is not None
+    extracted_text_hash, state, title, author, source = item
+    extracted_text = BlobStore(tmp_path / "blobs").get(extracted_text_hash).decode()
+    assert (state, title, author, source) == (
+        "extracted",
+        "Keeping State Small",
+        "Sam Lee",
+        "Engineering Notes",
+    )
+    assert "Small state spaces make failures easier to understand" in extracted_text
+    assert "Share this article everywhere" not in extracted_text
+    assert event_types == ["captured", "extracted"]
+
+
+def test_add_records_web_extraction_failure_without_rejecting_capture(
+    tmp_path: Path,
+) -> None:
+    raw_content = b"<html><head><title>Empty</title></head><body></body></html>"
+    with serve(raw_content, content_type="text/html") as (url, _):
+        result = run_modgud(tmp_path, "add", url)
+
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item = connection.execute(
+            "SELECT content_hash, extracted_text_hash, state FROM items"
+        ).fetchone()
+        events = connection.execute(
+            "SELECT type, payload FROM events ORDER BY id"
+        ).fetchall()
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"Added item 1: {url}\n"
+    assert item is not None
+    content_hash, extracted_text_hash, state = item
+    assert (extracted_text_hash, state) == (None, "failed")
+    assert BlobStore(tmp_path / "blobs").get(content_hash) == raw_content
+    assert [event[0] for event in events] == ["captured", "failed"]
+    failure = json.loads(events[-1][1])
+    assert failure["stage"] == "extraction"
+    assert "readable text" in failure["error"]
 
 
 @pytest.mark.parametrize(
@@ -188,7 +267,9 @@ def test_readding_a_known_url_records_a_capture_without_fetching_again(
     with connect(tmp_path / "modgud.sqlite3") as connection:
         counts = (
             connection.execute("SELECT count(*) FROM items").fetchone()[0],
-            connection.execute("SELECT count(*) FROM events").fetchone()[0],
+            connection.execute(
+                "SELECT count(*) FROM events WHERE type = 'captured'"
+            ).fetchone()[0],
         )
 
     assert first.stdout == f"Added item 1: {url}\n"

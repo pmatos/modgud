@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 
 from modgud.blobs import BlobStore
 from modgud.database import connect
+from modgud.extraction import ExtractionError, extract_web_page
 from modgud.formats import ItemFormat, detect_format
 from modgud.urls import canonicalize_url
 
@@ -62,6 +63,40 @@ def _record_capture(
     )
 
 
+def _record_extraction(
+    connection: sqlite3.Connection,
+    *,
+    item_id: int,
+    extracted_text_hash: str,
+) -> None:
+    payload = json.dumps(
+        {"extracted_text_hash": extracted_text_hash},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    connection.execute(
+        "INSERT INTO events (item_id, type, payload) VALUES (?, 'extracted', ?)",
+        (item_id, payload),
+    )
+
+
+def _record_extraction_failure(
+    connection: sqlite3.Connection,
+    *,
+    item_id: int,
+    error: str,
+) -> None:
+    payload = json.dumps(
+        {"error": error, "stage": "extraction"},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    connection.execute(
+        "INSERT INTO events (item_id, type, payload) VALUES (?, 'failed', ?)",
+        (item_id, payload),
+    )
+
+
 def _add(data_dir: Path, url: str) -> None:
     try:
         canonical_url = canonicalize_url(url)
@@ -85,22 +120,45 @@ def _add(data_dir: Path, url: str) -> None:
             return
 
     content, content_type, fetch_error = _fetch(url)
-    content_hash = BlobStore(data_dir / "blobs").put(content)
+    blob_store = BlobStore(data_dir / "blobs")
+    content_hash = blob_store.put(content)
     item_format = detect_format(
         canonical_url,
         content_type=content_type,
         content=content,
     )
+    extracted_text_hash = None
+    title = None
+    author = None
+    extracted_site = None
+    extraction_error = None
+    if fetch_error is None and item_format is ItemFormat.WEB:
+        try:
+            extracted_page = extract_web_page(content, url=canonical_url)
+        except ExtractionError as error:
+            extraction_error = f"{type(error).__name__}: {error}"
+        else:
+            extracted_text_hash = blob_store.put(extracted_page.text.encode("utf-8"))
+            title = extracted_page.title
+            author = extracted_page.author
+            extracted_site = extracted_page.site
+
     if fetch_error is not None:
         item_state = "failed"
     elif item_format in _UNSUMMARIZABLE_FORMATS:
         item_state = "unsummarizable"
+    elif extraction_error is not None:
+        item_state = "failed"
+    elif extracted_text_hash is not None:
+        item_state = "extracted"
     else:
         item_state = "captured"
     try:
         source = urlsplit(canonical_url).hostname or canonical_url
     except ValueError:
         source = canonical_url
+    if extracted_site is not None:
+        source = extracted_site
 
     with connect(database) as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -128,10 +186,27 @@ def _add(data_dir: Path, url: str) -> None:
 
         cursor = connection.execute(
             """
-            INSERT INTO items (canonical_url, content_hash, format, state, source)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO items (
+                canonical_url,
+                content_hash,
+                extracted_text_hash,
+                format,
+                state,
+                source,
+                title,
+                author
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (canonical_url, content_hash, item_format, item_state, source),
+            (
+                canonical_url,
+                content_hash,
+                extracted_text_hash,
+                item_format,
+                item_state,
+                source,
+                title,
+                author,
+            ),
         )
         inserted_item_id = cursor.lastrowid
         if inserted_item_id is None:
@@ -143,6 +218,18 @@ def _add(data_dir: Path, url: str) -> None:
             canonical_url=canonical_url,
             fetch_error=fetch_error,
         )
+        if extracted_text_hash is not None:
+            _record_extraction(
+                connection,
+                item_id=inserted_item_id,
+                extracted_text_hash=extracted_text_hash,
+            )
+        elif extraction_error is not None:
+            _record_extraction_failure(
+                connection,
+                item_id=inserted_item_id,
+                error=extraction_error,
+            )
 
     print(f"Added item {inserted_item_id}: {canonical_url}")
 
