@@ -1,0 +1,8 @@
+BEGIN IMMEDIATE;
+
+ALTER TABLE items ADD COLUMN title TEXT;
+ALTER TABLE items ADD COLUMN author TEXT;
+
+PRAGMA user_version = 3;
+
+COMMIT;
