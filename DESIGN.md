@@ -45,6 +45,16 @@ the web UI is not needed.
 Ingestion is idempotent. Canonical URL is the primary identity (strip tracking
 params, resolve `youtu.be`, drop YouTube `t=`, normalize trailing slashes);
 content hash is a secondary key, catching the same PDF arriving from two URLs.
+
+Some things have no canonical URL. A podcast episode is identified by its feed
+and its GUID, not by a page. Rather than add a second identity column, these get
+a **synthetic canonical form** — `podcast:<feed-hash>/<guid>` — so one unique
+constraint covers everything and dedup logic stays uniform.
+
+Dropping a **feed** URL captures its latest episode. It does not subscribe: a
+feed that keeps producing items would be the subscription firehose this system
+explicitly does not ingest, and would reintroduce the base rate that made the
+classifier pointless.
 Re-dropping a known item **logs a second capture event** — that is a signal,
 not a no-op — and returns the existing summary immediately.
 
