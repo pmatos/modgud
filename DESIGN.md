@@ -100,6 +100,13 @@ guarantee is not provider choice; it is that raw transcripts are persisted, so
 re-summarizing under any future model never requires re-fetching or
 re-transcribing.
 
+### Long inputs
+
+A transcript can exceed the context window of whatever model a task is routed
+to. Tier-1 summarization of long inputs reuses the same timestamped chunking
+built for span maps: summarize per chunk, then combine. There is one chunking
+mechanism in the system, not two.
+
 ### Span maps must not ask the model for timestamps
 
 Asking a model to read a 35k-token transcript and emit accurate timestamps
@@ -133,7 +140,12 @@ was already chosen, and the span map already says where the value is. Only the
   digest and never clicking through is a legitimate, complete use of the
   system. A digest that is only a list of links rebuilds the graveyard with
   better typography.
-- Ordered shortest-time-to-value first.
+- Ordered shortest-time-to-value first, computed from extracted text (not raw
+  markup) for text items and from duration for audio and video.
+- The boundary is the **last successful send**. Selection is not persisted
+  separately: a digest that fails to send leaves no `digest_sent` event, so the
+  next run selects the same items again. This is deliberate — a separate
+  "selected" marker would permanently skip items whenever a send failed.
 - ~10 items inline; the remainder as one-liners.
 - Overflow is **discarded, not carried forward** — otherwise a busy week
   compounds into a backlog inside the tool meant to cure backlogs.
@@ -182,6 +194,35 @@ browser extension it would have provided is replaceable with a bookmarklet.
 Storage formats stay open and greppable. The labels must outlive any model,
 embedding, or implementation choice.
 
+## Item lifecycle
+
+Every item carries exactly one state. Downstream surfaces (the digest, the item
+list, the CLI) branch on it, so it is defined once here rather than invented per
+ticket:
+
+| State | Meaning |
+|---|---|
+| `captured` | Raw content stored; nothing processed yet |
+| `extracted` | Readable text or a transcript is available |
+| `summarized` | A tier-1 artifact exists; eligible for the digest |
+| `unsummarizable` | Accepted and stored, but no summarization path exists for this format yet |
+| `failed` | Extraction or summarization errored; the error is recorded |
+
+State transitions are recorded as events. `failed` and `unsummarizable` are both
+digest-visible: an item that could not be processed still appears as a
+capture-only line, because silently dropping it reproduces the graveyard.
+
+## Configuration and secrets
+
+One config file holds everything an operator sets: the model routing table, the
+inbound poll interval, the digest send time, the web app's bind address, and the
+label-link token lifetime. Secrets — Postmark tokens, any hosted-provider API
+keys — come from the environment and are never written to the config file or the
+database.
+
+Malformed or missing configuration fails loudly at startup rather than part-way
+through a batch.
+
 ## Runtime
 
 - Python throughout, managed with `uv`. `yt-dlp` is callable in-process, and
@@ -192,6 +233,10 @@ embedding, or implementation choice.
 - **Audio/video** runs in a 03:00 batch under `nice -n 19` and `ionice`, so it
   never competes with the working day. Load-triggered scheduling was rejected:
   it produces behaviour that cannot be predicted or debugged.
+- Scheduling is external: **systemd timers** invoking CLI subcommands, not an
+  in-process scheduler. One timer for the 03:00 batch, one for the inbound poll,
+  one for the digest at 07:00. The process stays crash-safe and restartable, and
+  every scheduled action is runnable by hand.
 
 ## Build order
 
