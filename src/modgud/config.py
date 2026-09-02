@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 _MODEL_TASKS = frozenset({"transcription", "tier_1_summary", "span_map", "cleanup"})
 _ENVIRONMENT_VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _CLOCK_TIME = re.compile(r"([01][0-9]|2[0-3]):([0-5][0-9])\Z")
+_WHISPER_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
 class ConfigError(RuntimeError):
@@ -64,6 +65,15 @@ def _positive_integer(value: Any, *, field: str, path: Path) -> int:
     if type(value) is not int or value <= 0:
         raise ConfigError(f"Invalid config {path}: {field} must be a positive integer")
     return value
+
+
+def _whisper_model(value: Any, *, field: str, path: Path) -> str:
+    model = _non_empty_string(value, field=field, path=path)
+    if _WHISPER_MODEL.fullmatch(model) is None:
+        raise ConfigError(
+            f"Invalid config {path}: {field} must be a whisper.cpp model name"
+        )
+    return model
 
 
 def _reject_unknown(
@@ -159,6 +169,15 @@ class ModelRoute:
     api_key_env: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class WhisperCppSettings:
+    """Operator settings for the local whisper.cpp server."""
+
+    root: Path
+    model_size: str
+    threads: int
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class SecretValue:
     """A secret whose representation never reveals its value."""
@@ -198,6 +217,7 @@ class Settings:
     """Validated operator settings shared by every entrypoint."""
 
     models: Mapping[str, ModelRoute]
+    whisper_cpp: WhisperCppSettings
     inbound_poll_interval: timedelta
     digest_send_time: time
     digest_from_address: str
@@ -235,7 +255,7 @@ def _load_settings(path: Path) -> Settings:
 
     _reject_unknown(
         document,
-        {"digest", "inbound", "labels", "models", "web"},
+        {"digest", "inbound", "labels", "models", "web", "whisper_cpp"},
         field="",
         path=path,
     )
@@ -297,6 +317,53 @@ def _load_settings(path: Path) -> Settings:
                 path=path,
             ),
         )
+
+    whisper_cpp_document = _required_table(
+        document,
+        "whisper_cpp",
+        field="whisper_cpp",
+        path=path,
+    )
+    _reject_unknown(
+        whisper_cpp_document,
+        {"model_size", "root", "threads"},
+        field="whisper_cpp",
+        path=path,
+    )
+    whisper_cpp = WhisperCppSettings(
+        root=Path(
+            _non_empty_string(
+                _require(
+                    whisper_cpp_document,
+                    "root",
+                    field="whisper_cpp.root",
+                    path=path,
+                ),
+                field="whisper_cpp.root",
+                path=path,
+            )
+        ).expanduser(),
+        model_size=_whisper_model(
+            _require(
+                whisper_cpp_document,
+                "model_size",
+                field="whisper_cpp.model_size",
+                path=path,
+            ),
+            field="whisper_cpp.model_size",
+            path=path,
+        ),
+        threads=_positive_integer(
+            _require(
+                whisper_cpp_document,
+                "threads",
+                field="whisper_cpp.threads",
+                path=path,
+            ),
+            field="whisper_cpp.threads",
+            path=path,
+        ),
+    )
 
     inbound = _required_table(
         document,
@@ -408,6 +475,7 @@ def _load_settings(path: Path) -> Settings:
         model_api_keys[task] = SecretValue(api_key)
     return Settings(
         models=MappingProxyType(models),
+        whisper_cpp=whisper_cpp,
         inbound_poll_interval=timedelta(seconds=poll_interval_seconds),
         digest_send_time=digest_send_time,
         digest_from_address=digest_from_address,

@@ -199,6 +199,94 @@ def test_help_describes_the_command() -> None:
     assert "usage: modgud" in result.stdout
 
 
+def test_whisper_server_uses_the_configured_route_model_and_threads(
+    tmp_path: Path,
+) -> None:
+    whisper_root = tmp_path / "whisper.cpp"
+    server = whisper_root / "build/bin/whisper-server"
+    server.parent.mkdir(parents=True)
+    server.write_text(
+        "#!/usr/bin/python3\n"
+        "import json\n"
+        "import sys\n"
+        "print(json.dumps(sys.argv[1:]))\n",
+        encoding="utf-8",
+    )
+    server.chmod(0o755)
+    model = whisper_root / "models/ggml-tiny.en.bin"
+    model.parent.mkdir()
+    model.write_bytes(b"known test model")
+    example = Path(__file__).parents[1] / "config.example.toml"
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        example.read_text(encoding="utf-8")
+        .replace(
+            'root = "~/.local/share/modgud/whisper.cpp"',
+            f'root = "{whisper_root}"',
+        )
+        .replace('model_size = "large-v3-turbo"', 'model_size = "tiny.en"')
+        .replace("threads = 12", "threads = 7"),
+        encoding="utf-8",
+    )
+    data_dir = tmp_path / "data"
+
+    result = run_modgud(
+        data_dir,
+        "--config",
+        str(config_path),
+        "whisper-server",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8080",
+        "--model",
+        str(model),
+        "--threads",
+        "7",
+        "--language",
+        "auto",
+        "--inference-path",
+        "/v1/audio/transcriptions",
+        "--convert",
+    ]
+    assert not data_dir.exists()
+
+
+def test_whisper_server_names_a_model_that_has_not_been_downloaded(
+    tmp_path: Path,
+) -> None:
+    whisper_root = tmp_path / "whisper.cpp"
+    server = whisper_root / "build/bin/whisper-server"
+    server.parent.mkdir(parents=True)
+    server.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    server.chmod(0o755)
+    example = Path(__file__).parents[1] / "config.example.toml"
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        example.read_text(encoding="utf-8").replace(
+            'root = "~/.local/share/modgud/whisper.cpp"',
+            f'root = "{whisper_root}"',
+        ),
+        encoding="utf-8",
+    )
+    expected_model = whisper_root / "models/ggml-large-v3-turbo.bin"
+
+    result = run_modgud(
+        tmp_path / "data",
+        "--config",
+        str(config_path),
+        "whisper-server",
+    )
+
+    assert result.returncode == 2
+    assert f"whisper.cpp model not found: {expected_model}" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_startup_stops_before_creating_data_when_config_is_missing(
     tmp_path: Path,
 ) -> None:
