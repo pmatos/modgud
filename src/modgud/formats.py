@@ -125,6 +125,12 @@ def _detect_from_url(url: str) -> ItemFormat:
 
 
 def _detect_from_content_type(media_type: str) -> ItemFormat:
+    if media_type in {
+        "application/atom+xml",
+        "application/rss+xml",
+        "application/xml+rss",
+    }:
+        return ItemFormat.PODCAST
     if media_type in {"application/xhtml+xml", "text/html"}:
         return ItemFormat.WEB
     if media_type == "application/pdf":
