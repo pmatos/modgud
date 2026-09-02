@@ -34,7 +34,19 @@ from modgud.urls import canonicalize_url
         ),
         (
             "https://www.youtube.com/watch?v=AbC_123&t=1m30s&start=90&list=PL42",
-            "https://www.youtube.com/watch?v=AbC_123&list=PL42",
+            "https://www.youtube.com/watch?list=PL42&v=AbC_123",
+        ),
+        (
+            "https://youtu.be/AbC_123?list=PL42",
+            "https://www.youtube.com/watch?list=PL42&v=AbC_123",
+        ),
+        (
+            "https://youtube.com/watch?list=PL42&v=AbC_123",
+            "https://www.youtube.com/watch?list=PL42&v=AbC_123",
+        ),
+        (
+            "https://example.com/video?t=30&start=90",
+            "https://example.com/video?start=90&t=30",
         ),
     ],
 )

@@ -15,6 +15,7 @@ _TRACKING_PARAMETERS = frozenset(
         "msclkid",
     }
 )
+_YOUTU_BE_HOSTS = frozenset({"youtu.be", "www.youtu.be"})
 
 
 def canonicalize_url(url: str) -> str:
@@ -25,16 +26,12 @@ def canonicalize_url(url: str) -> str:
 
     userinfo = parts.netloc.rpartition("@")[0]
     host = parts.hostname.lower()
-    is_youtube = host in {
-        "youtu.be",
-        "youtube.com",
-        "www.youtu.be",
-        "www.youtube.com",
-    }
+    is_youtu_be = host in _YOUTU_BE_HOSTS
+    is_youtube = is_youtu_be or host in {"youtube.com", "www.youtube.com"}
     path = parts.path.rstrip("/")
     query_fields = parts.query.split("&") if parts.query else []
 
-    if host in {"youtu.be", "www.youtu.be"}:
+    if is_youtu_be:
         video_id = path.removeprefix("/").partition("/")[0]
         host = "www.youtube.com"
         path = "/watch"
@@ -54,7 +51,8 @@ def canonicalize_url(url: str) -> str:
         name = unquote_plus(field.partition("=")[0]).lower()
         is_tracking = name.startswith("utm_") or name in _TRACKING_PARAMETERS
         if not is_tracking and not (is_youtube and name in {"t", "start"}):
-            retained_query_fields.append(field)
+            retained_query_fields.append((name, field))
+    retained_query_fields.sort(key=lambda item: item[0])
 
-    query = "&".join(retained_query_fields)
+    query = "&".join(field for _, field in retained_query_fields)
     return urlunsplit((parts.scheme, netloc, path, query, parts.fragment))
