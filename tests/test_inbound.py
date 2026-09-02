@@ -15,7 +15,12 @@ import pytest
 from modgud.cli import main
 from modgud.config import SecretValue
 from modgud.database import connect
-from modgud.inbound import PostmarkClient, PostmarkError, poll_inbound
+from modgud.inbound import (
+    PostmarkClient,
+    PostmarkError,
+    pending_inbound_captures,
+    poll_inbound,
+)
 
 
 class FakePostmarkClient:
@@ -73,6 +78,19 @@ class _RetryingPostmarkHandler(BaseHTTPRequestHandler):
         pass
 
 
+class _CapturedTargetHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        body = b"%PDF-1.7\nA captured document"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/pdf")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
 @contextmanager
 def serve_retrying_postmark() -> Iterator[tuple[str, type[_RetryingPostmarkHandler]]]:
     handler = _RetryingPostmarkHandler
@@ -84,6 +102,19 @@ def serve_retrying_postmark() -> Iterator[tuple[str, type[_RetryingPostmarkHandl
     thread.start()
     try:
         yield f"http://127.0.0.1:{server.server_address[1]}", handler
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+@contextmanager
+def serve_captured_target() -> Iterator[str]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _CapturedTargetHandler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/paper.pdf"
     finally:
         server.shutdown()
         thread.join()
@@ -120,6 +151,423 @@ def test_poll_retrieves_and_durably_queues_a_new_inbound_message(
     assert result.skipped is False
     assert client.detail_requests == ["message-1"]
     assert stored == ("message-1", json.dumps(message, separators=(",", ":")))
+
+
+def test_plain_text_url_and_newsletter_origin_are_extracted_durably(
+    tmp_path: Path,
+) -> None:
+    message = {
+        "MessageID": "message-1",
+        "From": "delivery@example.net",
+        "TextBody": "Saved for later: https://example.com/useful?ref=inbox",
+        "HtmlBody": "",
+        "Headers": [
+            {
+                "Name": "List-Id",
+                "Value": "Systems Weekly <systems-weekly.example.net>",
+            }
+        ],
+    }
+    database = tmp_path / "modgud.sqlite3"
+
+    poll_inbound(
+        database,
+        FakePostmarkClient([message]),
+        poll_interval=timedelta(minutes=2),
+        now=datetime(2026, 9, 2, 12, tzinfo=UTC),
+    )
+
+    with connect(database) as connection:
+        extracted = connection.execute(
+            """
+            SELECT target_url, origin, processed_at, item_id
+            FROM postmark_inbound_messages
+            """
+        ).fetchone()
+
+    assert extracted == (
+        "https://example.com/useful?ref=inbox",
+        "systems-weekly.example.net",
+        None,
+        None,
+    )
+
+
+def test_html_url_is_used_when_plain_text_has_no_usable_url(tmp_path: Path) -> None:
+    message = {
+        "MessageID": "message-1",
+        "TextBody": "The saved article is linked in the HTML version.",
+        "HtmlBody": (
+            '<html><body><a href="https://example.com/from-html?utm_medium=email">'
+            "Read the article</a></body></html>"
+        ),
+        "Headers": [{"Name": "List-Id", "Value": "<engineering-weekly.example>"}],
+    }
+    database = tmp_path / "modgud.sqlite3"
+
+    poll_inbound(
+        database,
+        FakePostmarkClient([message]),
+        poll_interval=timedelta(minutes=2),
+        now=datetime(2026, 9, 2, 12, tzinfo=UTC),
+    )
+
+    with connect(database) as connection:
+        target_url = connection.execute(
+            "SELECT target_url FROM postmark_inbound_messages"
+        ).fetchone()[0]
+
+    assert target_url == "https://example.com/from-html?utm_medium=email"
+
+
+def test_visible_web_url_is_extracted_from_html_without_an_anchor(
+    tmp_path: Path,
+) -> None:
+    message = {
+        "MessageID": "message-1",
+        "TextBody": "",
+        "HtmlBody": (
+            "<html><head><style>"
+            "@import url(https://assets.example/fonts.css);"
+            "</style></head><body>"
+            "<p>Read https://example.com/visible.</p>"
+            "</body></html>"
+        ),
+        "Headers": [],
+    }
+    database = tmp_path / "modgud.sqlite3"
+
+    poll_inbound(
+        database,
+        FakePostmarkClient([message]),
+        poll_interval=timedelta(minutes=2),
+        now=datetime(2026, 9, 2, 12, tzinfo=UTC),
+    )
+
+    with connect(database) as connection:
+        target_url = connection.execute(
+            "SELECT target_url FROM postmark_inbound_messages"
+        ).fetchone()[0]
+
+    assert target_url == "https://example.com/visible"
+
+
+@pytest.mark.parametrize(
+    "forwarded_marker",
+    [
+        "---------- Forwarded message ---------",
+        "Begin forwarded message:",
+        "-----Original Message-----",
+    ],
+)
+def test_forwarded_envelope_supplies_the_original_sender_as_origin(
+    tmp_path: Path,
+    forwarded_marker: str,
+) -> None:
+    message = {
+        "MessageID": "message-1",
+        "From": "me@example.com",
+        "TextBody": f"""A good one.
+
+{forwarded_marker}
+From: Deep Systems <letters@deep-systems.example>
+Date: Wed, 2 Sep 2026 09:15:00 +0200
+Subject: Queues are coordination
+To: me@example.com
+
+Read https://articles.example/queues for the argument.
+""",
+        "HtmlBody": "",
+        "Headers": [],
+    }
+    database = tmp_path / "modgud.sqlite3"
+
+    poll_inbound(
+        database,
+        FakePostmarkClient([message]),
+        poll_interval=timedelta(minutes=2),
+        now=datetime(2026, 9, 2, 12, tzinfo=UTC),
+    )
+
+    with connect(database) as connection:
+        extracted = connection.execute(
+            "SELECT target_url, origin FROM postmark_inbound_messages"
+        ).fetchone()
+
+    assert extracted == (
+        "https://articles.example/queues",
+        "letters@deep-systems.example",
+    )
+
+
+def test_html_forwarded_envelope_supplies_the_original_sender_as_origin(
+    tmp_path: Path,
+) -> None:
+    message = {
+        "MessageID": "message-1",
+        "From": "me@example.com",
+        "TextBody": "",
+        "HtmlBody": """
+            <div>---------- Forwarded message ---------</div>
+            <div>From: Research Notes &lt;dispatch@research.example&gt;</div>
+            <div>Date: Wed, 2 Sep 2026 09:15:00 +0200</div>
+            <div>Subject: Evidence first</div>
+            <p><a href="https://articles.example/evidence">Read it</a></p>
+        """,
+        "Headers": [],
+    }
+    database = tmp_path / "modgud.sqlite3"
+
+    poll_inbound(
+        database,
+        FakePostmarkClient([message]),
+        poll_interval=timedelta(minutes=2),
+        now=datetime(2026, 9, 2, 12, tzinfo=UTC),
+    )
+
+    with connect(database) as connection:
+        extracted = connection.execute(
+            "SELECT target_url, origin FROM postmark_inbound_messages"
+        ).fetchone()
+
+    assert extracted == (
+        "https://articles.example/evidence",
+        "dispatch@research.example",
+    )
+
+
+@pytest.mark.parametrize(
+    "sender_fields",
+    [
+        {"From": "Ava Reader <AVA@EXAMPLE.COM>", "Headers": []},
+        {"FromFull": {"Name": "Ava Reader", "Email": "AVA@EXAMPLE.COM"}, "Headers": []},
+        {"Headers": [{"Name": "From", "Value": "Ava Reader <AVA@EXAMPLE.COM>"}]},
+    ],
+)
+def test_sender_mailbox_is_the_origin_when_no_newsletter_header_exists(
+    tmp_path: Path,
+    sender_fields: dict[str, Any],
+) -> None:
+    message = {
+        "MessageID": "message-1",
+        "TextBody": "https://example.com/recommended",
+        "HtmlBody": "",
+        **sender_fields,
+    }
+    database = tmp_path / "modgud.sqlite3"
+
+    poll_inbound(
+        database,
+        FakePostmarkClient([message]),
+        poll_interval=timedelta(minutes=2),
+        now=datetime(2026, 9, 2, 12, tzinfo=UTC),
+    )
+
+    with connect(database) as connection:
+        origin = connection.execute(
+            "SELECT origin FROM postmark_inbound_messages"
+        ).fetchone()[0]
+
+    assert origin == "ava@example.com"
+
+
+def test_message_without_a_usable_url_is_retained_with_unknown_origin(
+    tmp_path: Path,
+) -> None:
+    message = {
+        "MessageID": "message-without-url",
+        "TextBody": (
+            "A note with malformed https://[broken and "
+            "ftp://files.example/archive but no web link."
+        ),
+        "HtmlBody": '<a href="mailto:editor@example.com">Reply</a>',
+        "Headers": [],
+    }
+    database = tmp_path / "modgud.sqlite3"
+    received_at = datetime(2026, 9, 2, 12, tzinfo=UTC)
+
+    poll_inbound(
+        database,
+        FakePostmarkClient([message]),
+        poll_interval=timedelta(minutes=2),
+        now=received_at,
+    )
+
+    with connect(database) as connection:
+        stored = connection.execute(
+            """
+            SELECT message_id, payload, target_url, origin, processed_at, item_id
+            FROM postmark_inbound_messages
+            """
+        ).fetchone()
+
+    assert stored == (
+        "message-without-url",
+        json.dumps(message, separators=(",", ":")),
+        None,
+        None,
+        received_at.isoformat(),
+        None,
+    )
+
+
+def test_first_plain_text_web_url_wins_when_a_message_contains_multiple_urls(
+    tmp_path: Path,
+) -> None:
+    message = {
+        "MessageID": "message-1",
+        "From": "reader@example.com",
+        "TextBody": (
+            "Primary: https://first.example/article\n"
+            "Also mentioned: https://second.example/related"
+        ),
+        "HtmlBody": '<a href="https://html.example/alternative">HTML link</a>',
+        "Headers": [],
+    }
+    database = tmp_path / "modgud.sqlite3"
+
+    poll_inbound(
+        database,
+        FakePostmarkClient([message]),
+        poll_interval=timedelta(minutes=2),
+        now=datetime(2026, 9, 2, 12, tzinfo=UTC),
+    )
+
+    with connect(database) as connection:
+        target_url = connection.execute(
+            "SELECT target_url FROM postmark_inbound_messages"
+        ).fetchone()[0]
+
+    assert target_url == "https://first.example/article"
+
+
+def test_poll_command_captures_extracted_url_with_email_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        (Path(__file__).parents[1] / "config.example.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    data_dir = tmp_path / "data"
+    monkeypatch.setenv("POSTMARK_SERVER_TOKEN", "server-token")
+
+    with serve_captured_target() as target_url:
+        client = FakePostmarkClient(
+            [
+                {
+                    "MessageID": "message-1",
+                    "From": "curator@example.com",
+                    "TextBody": f"Worth reading: {target_url}",
+                    "HtmlBody": "",
+                    "Headers": [],
+                }
+            ]
+        )
+        monkeypatch.setattr("modgud.cli.PostmarkClient", lambda token: client)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "modgud",
+                "--config",
+                str(config_path),
+                "--data-dir",
+                str(data_dir),
+                "poll-inbound",
+            ],
+        )
+
+        main()
+
+    with connect(data_dir / "modgud.sqlite3") as connection:
+        item = connection.execute(
+            "SELECT id, canonical_url, format, state, source FROM items"
+        ).fetchone()
+        capture = json.loads(
+            connection.execute(
+                "SELECT payload FROM events WHERE type = 'captured'"
+            ).fetchone()[0]
+        )
+        queued = connection.execute(
+            """
+            SELECT target_url, origin, processed_at, item_id
+            FROM postmark_inbound_messages
+            """
+        ).fetchone()
+
+    assert item == (1, target_url, "pdf", "unsummarizable", "127.0.0.1")
+    assert capture == {
+        "canonical_url": target_url,
+        "inbound_message_id": "message-1",
+        "origin": "curator@example.com",
+        "url": target_url,
+    }
+    assert queued[:2] == (target_url, "curator@example.com")
+    assert queued[2] is not None
+    assert queued[3] == 1
+
+
+def test_messages_queued_before_extraction_was_added_are_enriched(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    messages = [
+        {
+            "MessageID": "legacy-with-url",
+            "From": "curator@example.com",
+            "TextBody": "https://example.com/from-existing-queue",
+            "HtmlBody": "",
+            "Headers": [],
+        },
+        {
+            "MessageID": "legacy-without-url",
+            "TextBody": "Remember to review this later.",
+            "HtmlBody": "",
+            "Headers": [],
+        },
+    ]
+    with connect(database) as connection:
+        connection.executemany(
+            """
+            INSERT INTO postmark_inbound_messages (message_id, payload)
+            VALUES (?, ?)
+            """,
+            [
+                (message["MessageID"], json.dumps(message, separators=(",", ":")))
+                for message in messages
+            ],
+        )
+
+    pending = pending_inbound_captures(database)
+
+    with connect(database) as connection:
+        stored = connection.execute(
+            """
+            SELECT message_id, target_url, origin, processed_at
+            FROM postmark_inbound_messages
+            ORDER BY message_id
+            """
+        ).fetchall()
+
+    assert [
+        (capture.message_id, capture.target_url, capture.origin) for capture in pending
+    ] == [
+        (
+            "legacy-with-url",
+            "https://example.com/from-existing-queue",
+            "curator@example.com",
+        )
+    ]
+    assert stored[0][:3] == (
+        "legacy-with-url",
+        "https://example.com/from-existing-queue",
+        "curator@example.com",
+    )
+    assert stored[0][3] is None
+    assert stored[1][:3] == ("legacy-without-url", None, None)
+    assert stored[1][3] is not None
 
 
 def test_durable_message_cursor_prevents_reprocessing_after_restart(
