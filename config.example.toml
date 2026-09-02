@@ -1,0 +1,32 @@
+# Copy this file to ~/.config/modgud/config.toml and adjust it for your system.
+# Keep API keys and Postmark tokens in environment variables, never in this file.
+
+[models.transcription]
+base_url = "http://127.0.0.1:8080/v1"
+model = "whisper-1"
+# For a hosted endpoint, name its environment variable without putting the key here:
+# api_key_env = "HOSTED_PROVIDER_API_KEY"
+
+[models.tier_1_summary]
+base_url = "http://127.0.0.1:11434/v1"
+model = "gemma4:26b-a4b"
+
+[models.span_map]
+base_url = "http://127.0.0.1:11434/v1"
+model = "gemma4:26b-a4b"
+
+[models.cleanup]
+base_url = "http://127.0.0.1:11434/v1"
+model = "gemma4:26b-a4b"
+
+[inbound]
+poll_interval_seconds = 120
+
+[digest]
+send_time = "07:00"
+
+[web]
+bind = "127.0.0.1:8000"
+
+[labels]
+token_lifetime_days = 90

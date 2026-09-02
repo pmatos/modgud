@@ -24,6 +24,22 @@ from modgud.youtube import (
 )
 
 
+@pytest.fixture(autouse=True)
+def operator_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_home = tmp_path / "config-home"
+    config_dir = config_home / "modgud"
+    config_dir.mkdir(parents=True)
+    example = Path(__file__).parents[1] / "config.example.toml"
+    (config_dir / "config.toml").write_text(
+        example.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+
+
 class _ResponseHandler(BaseHTTPRequestHandler):
     body = b""
     content_type = "application/octet-stream"
@@ -125,6 +141,49 @@ def test_help_describes_the_command() -> None:
 
     assert result.returncode == 0, result.stderr
     assert "usage: modgud" in result.stdout
+
+
+def test_startup_stops_before_creating_data_when_config_is_missing(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    missing_config = tmp_path / "missing.toml"
+
+    result = subprocess.run(
+        [
+            "modgud",
+            "--config",
+            str(missing_config),
+            "--data-dir",
+            str(data_dir),
+            "list",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert f"Configuration file not found: {missing_config}" in result.stderr
+    assert not data_dir.exists()
+
+
+def test_runtime_secret_is_neither_printed_nor_persisted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "postmark-secret-that-must-stay-in-memory"
+    monkeypatch.setenv("POSTMARK_SERVER_TOKEN", secret)
+
+    result = run_modgud(tmp_path, "list")
+    persisted = b"".join(
+        path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert secret not in result.stdout
+    assert secret not in result.stderr
+    assert secret.encode() not in persisted
 
 
 def test_add_captures_one_item_and_its_raw_content(tmp_path: Path) -> None:

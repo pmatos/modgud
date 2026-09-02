@@ -26,6 +26,42 @@ The installed command exposes its available options through standard CLI help:
 uv run modgud --help
 ```
 
+## Configuration
+
+modgud reads one TOML file at process startup. Copy the committed example to
+the default per-user location before running a command:
+
+```console
+mkdir -p ~/.config/modgud
+cp config.example.toml ~/.config/modgud/config.toml
+```
+
+The default follows `XDG_CONFIG_HOME` when it is set and otherwise uses
+`~/.config/modgud/config.toml`. Pass `--config /path/to/config.toml` to use a
+different file. The CLI loads it through `modgud.config.get_settings`, the
+shared startup seam for scheduled batch commands and the web app. The function
+validates and caches the file once per process, so those entrypoints consume
+one settings object rather than maintaining separate configuration paths.
+
+The file controls the four OpenAI-compatible model routes, inbound-mail poll
+interval, digest send time, web bind host and port, and label-link token
+lifetime. A hosted model route sets `api_key_env` to an environment-variable
+name; it never contains the key itself. For example:
+
+```toml
+[models.tier_1_summary]
+base_url = "https://provider.example/v1"
+model = "provider-model-name"
+api_key_env = "HOSTED_PROVIDER_API_KEY"
+```
+
+Export `HOSTED_PROVIDER_API_KEY` in the service environment. Postmark features
+read `POSTMARK_SERVER_TOKEN` (and `POSTMARK_ACCOUNT_TOKEN` when needed) from
+the environment as well. Secret values are held in redacting wrappers in
+memory; they are not part of the TOML schema, database schema, or diagnostic
+output. If a route names an unset environment variable, startup fails and
+names the missing variable without printing a value.
+
 Run the same quality gate used by CI:
 
 ```console
