@@ -26,6 +26,7 @@ from modgud.podcasts import (
 from modgud.summaries import summarize_item
 from modgud.time_to_value import recompute_time_to_value
 from modgud.urls import canonicalize_url
+from modgud.whisper_cpp import WhisperCppError, launch_server
 from modgud.youtube import ExtractedYouTube, extract_youtube
 
 _UNSUMMARIZABLE_FORMATS = frozenset(
@@ -572,6 +573,10 @@ def main(*, local_now: datetime | None = None) -> None:
         action="store_true",
         help="send immediately instead of waiting for the configured time",
     )
+    subparsers.add_parser(
+        "whisper-server",
+        help="run the configured local transcription endpoint",
+    )
 
     arguments = parser.parse_args()
     try:
@@ -593,6 +598,11 @@ def main(*, local_now: datetime | None = None) -> None:
             configured_time = settings.digest_send_time.strftime("%H:%M")
             print(f"Digest is not due until {configured_time}")
             return
+    if arguments.command == "whisper-server":
+        try:
+            launch_server(settings)
+        except WhisperCppError as error:
+            parser.error(str(error))
     data_dir: Path = arguments.data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
     if arguments.command == "add":

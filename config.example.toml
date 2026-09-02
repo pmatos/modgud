@@ -19,6 +19,13 @@ model = "gemma4:26b-a4b"
 base_url = "http://127.0.0.1:11434/v1"
 model = "gemma4:26b-a4b"
 
+[whisper_cpp]
+# The checkout created by the Vulkan build steps in README.md.
+root = "~/.local/share/modgud/whisper.cpp"
+# Any model name accepted by whisper.cpp's download-ggml-model.sh.
+model_size = "large-v3-turbo"
+threads = 12
+
 [inbound]
 poll_interval_seconds = 120
 

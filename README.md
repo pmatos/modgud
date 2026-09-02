@@ -65,6 +65,106 @@ processed timestamp. Usable URLs run through the same item pipeline as
 `modgud add`, while their capture events record the origin and Postmark message
 ID for provenance.
 
+## Local transcription
+
+The default transcription route is a local whisper.cpp server at
+`http://127.0.0.1:8080/v1/audio/transcriptions`. On this Arch Linux machine,
+install the compiler, Vulkan, and audio-conversion prerequisites with:
+
+```console
+sudo pacman -S --needed cmake ffmpeg gcc git glslang make ninja shaderc \
+  spirv-headers vulkan-headers vulkan-icd-loader vulkan-radeon
+```
+
+Build the v1.9.3 server with the cross-vendor Vulkan backend and download the
+configured production model:
+
+```console
+whisper_root="${XDG_DATA_HOME:-$HOME/.local/share}/modgud/whisper.cpp"
+mkdir -p "$(dirname "$whisper_root")"
+git clone --depth 1 --branch v1.9.3 \
+  https://github.com/ggml-org/whisper.cpp.git "$whisper_root"
+cmake -S "$whisper_root" -B "$whisper_root/build" -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DGGML_VULKAN=ON \
+  -DWHISPER_BUILD_SERVER=ON
+cmake --build "$whisper_root/build" --target whisper-server -j "$(nproc)"
+bash "$whisper_root/models/download-ggml-model.sh" \
+  large-v3-turbo "$whisper_root/models"
+```
+
+These commands were exercised on the AMD Radeon 890M/RADV host. The first
+server line should name that Vulkan device; `use gpu = 1` and `using Vulkan0
+backend` during model loading confirm that inference did not fall back to the
+CPU backend.
+
+Copy `config.example.toml` as described under [Configuration](#configuration),
+then run the server in the foreground from this checkout:
+
+```console
+uv run modgud whisper-server
+```
+
+`modgud` takes the bind host and port from `[models.transcription].base_url`
+and launches whisper.cpp with `--inference-path /v1/audio/transcriptions`,
+automatic language detection, and ffmpeg conversion enabled. It takes the
+checkout, weights, and compute settings from the same config file:
+
+```toml
+[whisper_cpp]
+root = "~/.local/share/modgud/whisper.cpp"
+model_size = "large-v3-turbo"
+threads = 12
+```
+
+To select another size, use `download-ggml-model.sh` with that name, update
+`model_size`, and restart the service. The launcher resolves it to
+`<root>/models/ggml-<model_size>.bin` and reports the missing path instead of
+starting if the model was not downloaded. Change `threads` to any positive
+integer to tune CPU-side work. The protocol-level model remains `whisper-1` in
+`[models.transcription]`; the local weights are selected by `model_size`.
+
+The checkout includes `samples/jfk.wav`, a known 11-second fixture. With the
+server running, exercise the exact routed OpenAI client used by modgud:
+
+```console
+uv run python - <<'PY'
+from modgud.config import get_settings
+from modgud.models import create_model_client
+
+settings = get_settings()
+routed = create_model_client("transcription", settings=settings)
+try:
+    with (settings.whisper_cpp.root / "samples/jfk.wav").open("rb") as audio:
+        result = routed.client.audio.transcriptions.create(
+            model=routed.model,
+            file=audio,
+        )
+    print(result.text)
+finally:
+    routed.client.close()
+PY
+```
+
+The result should contain “ask not what your country can do for you”. This
+verifies the routed base URL, multipart OpenAI request, configured inference
+path, model load, and transcription response end to end.
+
+For a persistent per-user endpoint, install modgud and the committed service:
+
+```console
+uv tool install .
+mkdir -p ~/.config/systemd/user
+cp systemd/modgud-whisper.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now modgud-whisper.service
+systemctl --user status modgud-whisper.service
+```
+
+The service is sandboxed, restarts after failures, reads the same default
+config file, and exposes only the address selected by the transcription route.
+Stop and disable it before changing that route to a hosted provider.
+
 ## Digest delivery
 
 Send the current digest immediately for a demo or manual run:

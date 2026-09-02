@@ -27,6 +27,11 @@ model = "gemma4:26b-a4b"
 base_url = "http://127.0.0.1:11434/v1"
 model = "gemma4:26b-a4b"
 
+[whisper_cpp]
+root = "/opt/whisper.cpp"
+model_size = "large-v3-turbo"
+threads = 12
+
 [inbound]
 poll_interval_seconds = 120
 
@@ -56,6 +61,9 @@ def test_operator_settings_are_loaded_from_one_file(tmp_path: Path) -> None:
         settings.models["transcription"].base_url,
         settings.models["transcription"].model,
         settings.models["tier_1_summary"].model,
+        settings.whisper_cpp.root,
+        settings.whisper_cpp.model_size,
+        settings.whisper_cpp.threads,
         settings.inbound_poll_interval,
         settings.digest_send_time,
         settings.digest_from_address,
@@ -67,6 +75,9 @@ def test_operator_settings_are_loaded_from_one_file(tmp_path: Path) -> None:
         "http://127.0.0.1:8080/v1",
         "whisper-1",
         "gemma4:26b-a4b",
+        Path("/opt/whisper.cpp"),
+        "large-v3-turbo",
+        12,
         timedelta(minutes=2),
         time(7),
         "modgud@example.com",
@@ -200,6 +211,11 @@ def test_literal_secrets_are_rejected_without_echoing_the_value(tmp_path: Path) 
             'model = "whisper-1"',
             'model = "whisper-1"\napi_key_env = "not-a-variable"',
             r"models\.transcription\.api_key_env must be an environment variable name",
+        ),
+        (
+            'model_size = "large-v3-turbo"',
+            'model_size = "../outside"',
+            r"whisper_cpp\.model_size must be a whisper\.cpp model name",
         ),
         (
             "poll_interval_seconds = 120",
