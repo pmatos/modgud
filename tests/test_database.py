@@ -8,6 +8,24 @@ import pytest
 from modgud.database import apply_migrations, connect
 
 
+def _insert_item(
+    connection: sqlite3.Connection,
+    *,
+    canonical_url: str = "https://example.com/article",
+    content_hash: str = "content",
+    format: str = "web",
+    state: str = "captured",
+    source: str = "example.com",
+) -> sqlite3.Cursor:
+    return connection.execute(
+        """
+        INSERT INTO items (canonical_url, content_hash, format, state, source)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (canonical_url, content_hash, format, state, source),
+    )
+
+
 def test_opening_a_new_database_creates_the_durable_store(tmp_path: Path) -> None:
     with connect(tmp_path / "modgud.sqlite3") as connection:
         tables = {
@@ -24,19 +42,7 @@ def test_items_store_identity_format_state_source_and_timestamps(
     tmp_path: Path,
 ) -> None:
     with connect(tmp_path / "modgud.sqlite3") as connection:
-        connection.execute(
-            """
-            INSERT INTO items (canonical_url, content_hash, format, state, source)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                "https://example.com/article",
-                "a" * 64,
-                "web",
-                "captured",
-                "example.com",
-            ),
-        )
+        _insert_item(connection, content_hash="a" * 64)
         item = connection.execute(
             """
             SELECT canonical_url, content_hash, format, state, source,
@@ -67,23 +73,19 @@ def test_item_state_is_limited_to_the_lifecycle(tmp_path: Path) -> None:
 
     with connect(tmp_path / "modgud.sqlite3") as connection:
         for position, state in enumerate(allowed_states):
-            connection.execute(
-                """
-                INSERT INTO items
-                    (canonical_url, content_hash, format, state, source)
-                VALUES (?, ?, 'web', ?, 'example.com')
-                """,
-                (f"https://example.com/{position}", str(position), state),
+            _insert_item(
+                connection,
+                canonical_url=f"https://example.com/{position}",
+                content_hash=str(position),
+                state=state,
             )
 
         with pytest.raises(sqlite3.IntegrityError):
-            connection.execute(
-                """
-                INSERT INTO items
-                    (canonical_url, content_hash, format, state, source)
-                VALUES ('https://example.com/invalid', 'invalid', 'web',
-                        'pending', 'example.com')
-                """
+            _insert_item(
+                connection,
+                canonical_url="https://example.com/invalid",
+                content_hash="invalid",
+                state="pending",
             )
 
         stored_states = {
@@ -95,32 +97,17 @@ def test_item_state_is_limited_to_the_lifecycle(tmp_path: Path) -> None:
 
 def test_item_identities_prevent_duplicate_content(tmp_path: Path) -> None:
     with connect(tmp_path / "modgud.sqlite3") as connection:
-        connection.execute(
-            """
-            INSERT INTO items (canonical_url, content_hash, format, state, source)
-            VALUES ('https://example.com/article', 'same-content', 'web',
-                    'captured', 'example.com')
-            """
-        )
+        _insert_item(connection, content_hash="same-content")
 
         with pytest.raises(sqlite3.IntegrityError):
-            connection.execute(
-                """
-                INSERT INTO items
-                    (canonical_url, content_hash, format, state, source)
-                VALUES ('https://example.com/article', 'other-content', 'web',
-                        'captured', 'example.com')
-                """
-            )
+            _insert_item(connection, content_hash="other-content")
 
         with pytest.raises(sqlite3.IntegrityError):
-            connection.execute(
-                """
-                INSERT INTO items
-                    (canonical_url, content_hash, format, state, source)
-                VALUES ('https://mirror.example/article', 'same-content', 'web',
-                        'captured', 'mirror.example')
-                """
+            _insert_item(
+                connection,
+                canonical_url="https://mirror.example/article",
+                content_hash="same-content",
+                source="mirror.example",
             )
 
         item_count = connection.execute("SELECT count(*) FROM items").fetchone()[0]
@@ -130,14 +117,7 @@ def test_item_identities_prevent_duplicate_content(tmp_path: Path) -> None:
 
 def test_events_store_item_reference_type_payload_and_timestamp(tmp_path: Path) -> None:
     with connect(tmp_path / "modgud.sqlite3") as connection:
-        cursor = connection.execute(
-            """
-            INSERT INTO items (canonical_url, content_hash, format, state, source)
-            VALUES ('https://example.com/article', 'content', 'web',
-                    'captured', 'example.com')
-            """
-        )
-        item_id = cursor.lastrowid
+        item_id = _insert_item(connection).lastrowid
         connection.execute(
             """
             INSERT INTO events (item_id, type, payload)
@@ -170,13 +150,7 @@ def test_an_event_must_reference_an_existing_item(tmp_path: Path) -> None:
 
 def test_event_payload_must_be_valid_json(tmp_path: Path) -> None:
     with connect(tmp_path / "modgud.sqlite3") as connection:
-        cursor = connection.execute(
-            """
-            INSERT INTO items (canonical_url, content_hash, format, state, source)
-            VALUES ('https://example.com/article', 'content', 'web',
-                    'captured', 'example.com')
-            """
-        )
+        cursor = _insert_item(connection)
 
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
@@ -190,13 +164,7 @@ def test_event_payload_must_be_valid_json(tmp_path: Path) -> None:
 
 def test_events_cannot_be_updated_or_deleted(tmp_path: Path) -> None:
     with connect(tmp_path / "modgud.sqlite3") as connection:
-        item = connection.execute(
-            """
-            INSERT INTO items (canonical_url, content_hash, format, state, source)
-            VALUES ('https://example.com/article', 'content', 'web',
-                    'captured', 'example.com')
-            """
-        )
+        item = _insert_item(connection)
         event = connection.execute(
             """
             INSERT INTO events (item_id, type, payload)
@@ -227,13 +195,7 @@ def test_events_cannot_be_updated_or_deleted(tmp_path: Path) -> None:
 
 def test_events_cannot_be_replaced(tmp_path: Path) -> None:
     with connect(tmp_path / "modgud.sqlite3") as connection:
-        item = connection.execute(
-            """
-            INSERT INTO items (canonical_url, content_hash, format, state, source)
-            VALUES ('https://example.com/article', 'content', 'web',
-                    'captured', 'example.com')
-            """
-        )
+        item = _insert_item(connection)
         event = connection.execute(
             """
             INSERT INTO events (item_id, type, payload)
@@ -261,13 +223,7 @@ def test_events_cannot_be_replaced(tmp_path: Path) -> None:
 
 def test_applying_migrations_twice_is_a_no_op(tmp_path: Path) -> None:
     with connect(tmp_path / "modgud.sqlite3") as connection:
-        connection.execute(
-            """
-            INSERT INTO items (canonical_url, content_hash, format, state, source)
-            VALUES ('https://example.com/article', 'content', 'web',
-                    'captured', 'example.com')
-            """
-        )
+        _insert_item(connection)
 
         apply_migrations(connection)
         migration_left_transaction_untouched = connection.in_transaction
