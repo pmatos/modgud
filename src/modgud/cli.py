@@ -13,6 +13,7 @@ from modgud.blobs import BlobStore
 from modgud.database import connect
 from modgud.extraction import ExtractionError, extract_web_page
 from modgud.formats import ItemFormat, detect_format
+from modgud.time_to_value import recompute_time_to_value
 from modgud.urls import canonicalize_url
 
 _UNSUMMARIZABLE_FORMATS = frozenset(
@@ -132,13 +133,15 @@ def _add(data_dir: Path, url: str) -> None:
     author = None
     extracted_site = None
     extraction_error = None
+    extracted_text = None
     if fetch_error is None and item_format is ItemFormat.WEB:
         try:
             extracted_page = extract_web_page(content, url=canonical_url)
         except ExtractionError as error:
             extraction_error = f"{type(error).__name__}: {error}"
         else:
-            extracted_text_hash = blob_store.put(extracted_page.text.encode("utf-8"))
+            extracted_text = extracted_page.text
+            extracted_text_hash = blob_store.put(extracted_text.encode("utf-8"))
             title = extracted_page.title
             author = extracted_page.author
             extracted_site = extracted_page.site
@@ -223,6 +226,11 @@ def _add(data_dir: Path, url: str) -> None:
                 connection,
                 item_id=inserted_item_id,
                 extracted_text_hash=extracted_text_hash,
+            )
+            recompute_time_to_value(
+                connection,
+                item_id=inserted_item_id,
+                extracted_text=extracted_text,
             )
         elif extraction_error is not None:
             _record_extraction_failure(

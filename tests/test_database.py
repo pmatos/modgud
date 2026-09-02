@@ -92,6 +92,35 @@ def test_items_store_extracted_web_metadata(tmp_path: Path) -> None:
     )
 
 
+def test_items_store_duration_and_time_to_value_estimates(tmp_path: Path) -> None:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url,
+                content_hash,
+                format,
+                state,
+                source,
+                duration_seconds,
+                time_to_value_seconds
+            ) VALUES (?, ?, 'youtube', 'captured', ?, ?, ?)
+            """,
+            (
+                "https://www.youtube.com/watch?v=example",
+                "a" * 64,
+                "Example Channel",
+                90.2,
+                91,
+            ),
+        )
+        stored = connection.execute(
+            "SELECT duration_seconds, time_to_value_seconds FROM items"
+        ).fetchone()
+
+    assert stored == (90.2, 91)
+
+
 def test_item_state_is_limited_to_the_lifecycle(tmp_path: Path) -> None:
     allowed_states = (
         "captured",
