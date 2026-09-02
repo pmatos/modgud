@@ -5,6 +5,7 @@ description = "A personal content triage system"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "openai>=2,<3",
     "trafilatura>=2.2.0,<3",
     "yt-dlp>=2026.8.19",
 ]

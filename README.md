@@ -62,6 +62,13 @@ memory; they are not part of the TOML schema, database schema, or diagnostic
 output. If a route names an unset environment variable, startup fails and
 names the missing variable without printing a value.
 
+Model callers use the same `modgud.models.create_model_client` factory for all
+four tasks. It returns the OpenAI-compatible client and configured model as one
+routed value. The factory supplies local endpoints with a non-secret placeholder
+credential because the OpenAI client requires one; hosted routes instead use
+the secret captured from the row's `api_key_env`. No caller branches on the
+provider or endpoint.
+
 Run the same quality gate used by CI:
 
 ```console
