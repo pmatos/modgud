@@ -41,7 +41,10 @@ class BlobStore:
 
     def get(self, blob_hash: str) -> bytes:
         """Retrieve content previously stored under a SHA-256 hash."""
-        return self._path(blob_hash).read_bytes()
+        content = self._path(blob_hash).read_bytes()
+        if hashlib.sha256(content).hexdigest() != blob_hash:
+            raise ValueError(f"blob content does not match hash {blob_hash}")
+        return content
 
     def _path(self, blob_hash: str) -> Path:
         if len(blob_hash) != 64 or any(

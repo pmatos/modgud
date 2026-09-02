@@ -81,3 +81,16 @@ def test_retrieval_rejects_values_that_are_not_sha256_hashes(tmp_path: Path) -> 
 
     with pytest.raises(ValueError, match="SHA-256"):
         store.get("../../not-a-hash")
+
+
+def test_retrieval_rejects_content_that_does_not_match_its_hash(
+    tmp_path: Path,
+) -> None:
+    store = BlobStore(tmp_path)
+    blob_hash = store.put(b"hello world")
+    blob_path = tmp_path / "sha256" / blob_hash[:2] / blob_hash
+    blob_path.chmod(0o644)
+    blob_path.write_bytes(b"corrupted")
+
+    with pytest.raises(ValueError, match="does not match hash"):
+        store.get(blob_hash)
