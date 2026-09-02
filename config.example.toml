@@ -26,7 +26,9 @@ poll_interval_seconds = 120
 send_time = "07:00"
 
 [web]
-bind = "127.0.0.1:8000"
+# The web drop box is LAN-only, not internet-exposed: bind to an interface
+# reachable from other devices on your LAN, not just this machine.
+bind = "0.0.0.0:8000"
 
 [labels]
 token_lifetime_days = 90

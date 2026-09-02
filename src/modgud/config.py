@@ -17,7 +17,7 @@ _ENVIRONMENT_VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _CLOCK_TIME = re.compile(r"([01][0-9]|2[0-3]):([0-5][0-9])\Z")
 
 
-class ConfigError(RuntimeError):
+class ConfigError(ValueError):
     """Configuration cannot be loaded safely."""
 
 
