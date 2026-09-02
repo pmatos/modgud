@@ -7,10 +7,17 @@ dispatch eligibility included) sees the same graph a reader does.
 
 Idempotent: existing edges are left alone. --dry-run to preview.
 """
-import argparse, json, re, subprocess, sys
+
+import argparse
+import json
+import re
+import subprocess
+import sys
 
 REPO = "pmatos/modgud"
-BLOCKED_BY = re.compile(r"##\s*Blocked by\s*(.*?)(?:\n##|\Z)", re.S | re.I)
+BLOCKED_BY = re.compile(
+    r"##\s*Blocked by\s*(.*?)(?:\n##|\Z)", re.DOTALL | re.IGNORECASE
+)
 REF = re.compile(r"#(\d+)")
 
 
@@ -41,8 +48,11 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    issues = [i for i in paged(f"repos/{REPO}/issues?state=all&per_page=100")
-              if "pull_request" not in i]
+    issues = [
+        i
+        for i in paged(f"repos/{REPO}/issues?state=all&per_page=100")
+        if "pull_request" not in i
+    ]
     by_num = {i["number"]: i for i in issues}
 
     added = skipped = failed = 0
@@ -50,8 +60,13 @@ def main() -> int:
         want = blockers(by_num[num]["body"])
         if not want:
             continue
-        have = {d["number"] for d in json.loads(
-            gh("api", f"repos/{REPO}/issues/{num}/dependencies/blocked_by").stdout or "[]")}
+        have = {
+            d["number"]
+            for d in json.loads(
+                gh("api", f"repos/{REPO}/issues/{num}/dependencies/blocked_by").stdout
+                or "[]"
+            )
+        }
         for dep in want:
             if dep in have:
                 skipped += 1
@@ -64,9 +79,15 @@ def main() -> int:
             if args.dry_run:
                 added += 1
                 continue
-            r = gh("api", "--method", "POST",
-                   f"repos/{REPO}/issues/{num}/dependencies/blocked_by",
-                   "-F", f"issue_id={by_num[dep]['id']}", check=False)
+            r = gh(
+                "api",
+                "--method",
+                "POST",
+                f"repos/{REPO}/issues/{num}/dependencies/blocked_by",
+                "-F",
+                f"issue_id={by_num[dep]['id']}",
+                check=False,
+            )
             if r.returncode == 0:
                 added += 1
             else:
