@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from modgud.database import connect
-from modgud.digests import DigestItem, select_digest_items
+from modgud.digests import DigestItem, render_digest, select_digest_items
 from modgud.formats import ItemFormat
 from modgud.summaries import Tier1Summary
 
@@ -195,3 +195,206 @@ def test_recaptured_item_after_the_send_boundary_is_selected_once(
     selected = select_digest_items(event_log)
 
     assert [item.id for item in selected] == [item_id]
+
+
+def test_renders_one_complete_tier_1_item_as_html_and_plain_text() -> None:
+    item = DigestItem(
+        id=1,
+        canonical_url="https://example.com/useful",
+        format=ItemFormat.WEB,
+        state="summarized",
+        source="Example Journal",
+        title="A useful article",
+        author="Ada Rivera",
+        time_to_value_seconds=90,
+        summary=Tier1Summary(
+            one_liner="An article about choosing work with the fastest payoff.",
+            claims=(
+                "Short tasks provide feedback quickly.",
+                "Feedback reduces uncertainty.",
+                "Lower uncertainty improves later choices.",
+            ),
+        ),
+    )
+
+    rendered = render_digest((item,))
+
+    assert (
+        rendered.text
+        == """modgud digest
+=============
+
+1. A useful article
+   Example Journal · Ada Rivera · 2 min
+   https://example.com/useful
+
+   An article about choosing work with the fastest payoff.
+
+   Claims:
+   - Short tasks provide feedback quickly.
+   - Feedback reduces uncertainty.
+   - Lower uncertainty improves later choices.
+"""
+    )
+    assert '<a href="https://example.com/useful">A useful article</a>' in rendered.html
+    assert "Example Journal · Ada Rivera · 2 min" in rendered.html
+    assert (
+        "<p>An article about choosing work with the fastest payoff.</p>"
+        in rendered.html
+    )
+    assert "<li>Short tasks provide feedback quickly.</li>" in rendered.html
+    assert "<li>Feedback reduces uncertainty.</li>" in rendered.html
+    assert "<li>Lower uncertainty improves later choices.</li>" in rendered.html
+
+
+@pytest.mark.parametrize("state", ["failed", "unsummarizable"])
+def test_renders_an_item_without_a_summary_as_capture_only(state: str) -> None:
+    item = DigestItem(
+        id=1,
+        canonical_url="https://example.com/capture",
+        format=ItemFormat.PDF,
+        state=state,
+        source="example.com",
+        title="Captured document",
+        author=None,
+        time_to_value_seconds=None,
+        summary=None,
+    )
+
+    rendered = render_digest((item,))
+
+    assert "Capture only — no summary is available." in rendered.text
+    assert "Capture only — no summary is available." in rendered.html
+    assert "Captured document" in rendered.text
+    assert "Captured document" in rendered.html
+    assert "https://example.com/capture" in rendered.text
+    assert "Claims" not in rendered.text
+    assert "<h3>Claims</h3>" not in rendered.html
+
+
+def test_fifty_items_are_all_rendered_with_only_the_first_ten_expanded() -> None:
+    items = tuple(
+        DigestItem(
+            id=position,
+            canonical_url=f"https://example.com/{position}",
+            format=ItemFormat.WEB,
+            state="summarized",
+            source=f"Source {position}",
+            title=f"Article {position}",
+            author=None,
+            time_to_value_seconds=position * 60,
+            summary=Tier1Summary(
+                one_liner=f"One-line summary {position}.",
+                claims=(
+                    f"Claim {position} alpha.",
+                    f"Claim {position} beta.",
+                    f"Claim {position} gamma.",
+                ),
+            ),
+        )
+        for position in range(1, 51)
+    )
+
+    rendered = render_digest(items)
+
+    for position in range(1, 51):
+        assert f"Article {position}" in rendered.text
+        assert f"Article {position}" in rendered.html
+        assert f"One-line summary {position}." in rendered.text
+        assert f"One-line summary {position}." in rendered.html
+    assert "Claim 10 alpha." in rendered.text
+    assert "Claim 10 alpha." in rendered.html
+    assert "Claim 11 alpha." not in rendered.text
+    assert "Claim 11 alpha." not in rendered.html
+    assert (
+        "11. Article 11 — One-line summary 11. — Source 11 — https://example.com/11"
+    ) in rendered.text.splitlines()
+    assert (
+        '<li><a href="https://example.com/50">Article 50</a> — '
+        "One-line summary 50. — Source 50</li>"
+    ) in rendered.html
+
+
+def test_compact_capture_only_item_still_says_that_no_summary_is_available() -> None:
+    summarized_items = tuple(
+        DigestItem(
+            id=position,
+            canonical_url=f"https://example.com/{position}",
+            format=ItemFormat.WEB,
+            state="summarized",
+            source="example.com",
+            title=f"Article {position}",
+            author=None,
+            time_to_value_seconds=60,
+            summary=Tier1Summary(
+                one_liner=f"Summary {position}.",
+                claims=("First.", "Second.", "Third."),
+            ),
+        )
+        for position in range(1, 11)
+    )
+    capture_only = DigestItem(
+        id=11,
+        canonical_url="https://example.com/11",
+        format=ItemFormat.PDF,
+        state="unsummarizable",
+        source="example.com",
+        title="Captured PDF",
+        author=None,
+        time_to_value_seconds=None,
+        summary=None,
+    )
+
+    rendered = render_digest((*summarized_items, capture_only))
+
+    expected = (
+        "11. Captured PDF — Capture only — no summary is available. — "
+        "example.com — https://example.com/11"
+    )
+    assert expected in rendered.text.splitlines()
+    assert "Captured PDF</a> — Capture only — no summary is available." in (
+        rendered.html
+    )
+
+
+def test_html_escapes_captured_and_generated_content() -> None:
+    item = DigestItem(
+        id=1,
+        canonical_url='https://example.com/?left=1&right="2"',
+        format=ItemFormat.WEB,
+        state="summarized",
+        source="Journal & News",
+        title="<A useful article>",
+        author='Ada "Ace" Rivera',
+        time_to_value_seconds=None,
+        summary=Tier1Summary(
+            one_liner="Queues <persist> & recover.",
+            claims=("One < two.", "Two > one.", "A & B agree."),
+        ),
+    )
+
+    rendered = render_digest((item,))
+
+    assert "&lt;A useful article&gt;" in rendered.html
+    assert "Journal &amp; News · Ada &quot;Ace&quot; Rivera" in rendered.html
+    assert 'href="https://example.com/?left=1&amp;right=&quot;2&quot;"' in rendered.html
+    assert "Queues &lt;persist&gt; &amp; recover." in rendered.html
+    assert "<li>One &lt; two.</li>" in rendered.html
+    assert "<A useful article>" in rendered.text
+
+
+def test_successful_digest_boundary_discards_compact_overflow(
+    event_log: sqlite3.Connection,
+) -> None:
+    for _position in range(11):
+        _add_item(event_log, state="failed")
+    selected = select_digest_items(event_log)
+
+    rendered = render_digest(selected)
+    event_log.execute(
+        "INSERT INTO events (item_id, type, payload) VALUES (?, 'digest_sent', '{}')",
+        (selected[0].id,),
+    )
+
+    assert "11. example.com — Capture only" in rendered.text
+    assert select_digest_items(event_log) == ()

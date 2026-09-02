@@ -1,11 +1,16 @@
-"""Pure selection of items for the next digest."""
+"""Select and render items for the next digest."""
 
 import json
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
+from html import escape
 
 from modgud.formats import ItemFormat
 from modgud.summaries import Tier1Summary
+
+_INLINE_ITEM_LIMIT = 10
+_CAPTURE_ONLY = "Capture only — no summary is available."
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +26,101 @@ class DigestItem:
     author: str | None
     time_to_value_seconds: int | None
     summary: Tier1Summary | None
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedDigest:
+    """The alternative bodies of one self-contained email digest."""
+
+    html: str
+    text: str
+
+
+def _item_title(item: DigestItem) -> str:
+    return item.title or item.source
+
+
+def _item_metadata(item: DigestItem) -> str:
+    parts = [item.source]
+    if item.author is not None:
+        parts.append(item.author)
+    if item.time_to_value_seconds is not None:
+        minutes = (item.time_to_value_seconds + 59) // 60
+        parts.append(f"{minutes} min")
+    return " · ".join(parts)
+
+
+def render_digest(items: Sequence[DigestItem]) -> RenderedDigest:
+    """Render selected items as complete HTML and plain-text email bodies."""
+    text_parts = ["modgud digest", "=============", ""]
+    html_parts = [
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">',
+        "<title>modgud digest</title></head><body>",
+        "<h1>modgud digest</h1>",
+    ]
+    for position, item in enumerate(items, start=1):
+        title = _item_title(item)
+        metadata = _item_metadata(item)
+        if position > _INLINE_ITEM_LIMIT:
+            if position == _INLINE_ITEM_LIMIT + 1:
+                text_parts.extend(["More items", "----------", ""])
+                html_parts.extend(["<section><h2>More items</h2>", '<ol start="11">'])
+            description = (
+                item.summary.one_liner if item.summary is not None else _CAPTURE_ONLY
+            )
+            text_parts.append(
+                f"{position}. {title} — {description} — {item.source} — "
+                f"{item.canonical_url}"
+            )
+            html_parts.append(
+                f'<li><a href="{escape(item.canonical_url, quote=True)}">'
+                f"{escape(title)}</a> — {escape(description)} — "
+                f"{escape(item.source)}</li>"
+            )
+            continue
+        text_parts.extend(
+            [
+                f"{position}. {title}",
+                f"   {metadata}",
+                f"   {item.canonical_url}",
+                "",
+            ]
+        )
+        html_parts.extend(
+            [
+                "<article>",
+                (
+                    f'<h2>{position}. <a href="{escape(item.canonical_url, quote=True)}">'
+                    f"{escape(title)}</a></h2>"
+                ),
+                f"<p>{escape(metadata)}</p>",
+            ]
+        )
+        if item.summary is None:
+            text_parts.extend([f"   {_CAPTURE_ONLY}", ""])
+            html_parts.extend([f"<p>{_CAPTURE_ONLY}</p>", "</article>"])
+            continue
+        text_parts.extend(
+            [
+                f"   {item.summary.one_liner}",
+                "",
+                "   Claims:",
+                *(f"   - {claim}" for claim in item.summary.claims),
+                "",
+            ]
+        )
+        html_parts.extend(
+            [
+                f"<p>{escape(item.summary.one_liner)}</p>",
+                "<h3>Claims</h3><ul>",
+                *(f"<li>{escape(claim)}</li>" for claim in item.summary.claims),
+                "</ul></article>",
+            ]
+        )
+    if len(items) > _INLINE_ITEM_LIMIT:
+        html_parts.append("</ol></section>")
+    html_parts.append("</body></html>")
+    return RenderedDigest(html="".join(html_parts), text="\n".join(text_parts))
 
 
 def _stored_summary(one_liner: object, claims_json: object) -> Tier1Summary | None:
