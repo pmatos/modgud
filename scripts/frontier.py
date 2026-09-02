@@ -7,11 +7,18 @@ decides which tickets the daemon may pick up.
 
 Run after merges to advance the frontier. Idempotent; --dry-run to preview.
 """
-import argparse, json, re, subprocess, sys
+
+import argparse
+import json
+import re
+import subprocess
+import sys
 
 REPO = "pmatos/modgud"
 LABEL = "agent-ready"
-BLOCKED_BY = re.compile(r"##\s*Blocked by\s*(.*?)(?:\n##|\Z)", re.S | re.I)
+BLOCKED_BY = re.compile(
+    r"##\s*Blocked by\s*(.*?)(?:\n##|\Z)", re.DOTALL | re.IGNORECASE
+)
 REF = re.compile(r"#(\d+)")
 
 
@@ -32,8 +39,18 @@ def main() -> int:
     args = ap.parse_args()
 
     issues = json.loads(
-        gh("issue", "list", "--repo", REPO, "--state", "all", "--limit", "500",
-           "--json", "number,title,body,state,labels")
+        gh(
+            "issue",
+            "list",
+            "--repo",
+            REPO,
+            "--state",
+            "all",
+            "--limit",
+            "500",
+            "--json",
+            "number,title,body,state,labels",
+        )
     )
     state = {i["number"]: i["state"].upper() for i in issues}
 
@@ -44,7 +61,9 @@ def main() -> int:
         deps = blockers(i["body"])
         unknown = deps - state.keys()
         if unknown:
-            print(f"#{i['number']}: unknown blockers {sorted(unknown)}", file=sys.stderr)
+            print(
+                f"#{i['number']}: unknown blockers {sorted(unknown)}", file=sys.stderr
+            )
         open_deps = sorted(d for d in deps if state.get(d, "OPEN") == "OPEN")
         eligible = not open_deps
         labelled = LABEL in {l["name"] for l in i["labels"]}
@@ -57,11 +76,22 @@ def main() -> int:
 
     for num, title, eligible, open_deps in changes:
         verb = "add" if eligible else "remove"
-        why = "unblocked" if eligible else "blocked by " + ", ".join(f"#{d}" for d in open_deps)
+        why = (
+            "unblocked"
+            if eligible
+            else "blocked by " + ", ".join(f"#{d}" for d in open_deps)
+        )
         print(f"{verb:>6} {LABEL}  #{num} {title}  ({why})")
         if not args.dry_run:
-            gh("issue", "edit", str(num), "--repo", REPO,
-               f"--{'add' if eligible else 'remove'}-label", LABEL)
+            gh(
+                "issue",
+                "edit",
+                str(num),
+                "--repo",
+                REPO,
+                f"--{'add' if eligible else 'remove'}-label",
+                LABEL,
+            )
     return 0
 
 

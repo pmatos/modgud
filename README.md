@@ -12,6 +12,29 @@ you across.
 Pre-implementation. See [DESIGN.md](DESIGN.md) for the settled design and
 [milestone 1](DESIGN.md#build-order) for what gets built first.
 
+## Development
+
+Install the project and its development tools with uv:
+
+```console
+uv sync
+```
+
+The installed command exposes its available options through standard CLI help:
+
+```console
+uv run modgud --help
+```
+
+Run the same quality gate used by CI:
+
+```console
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy
+uv run pytest
+```
+
 ## Shape
 
 - **In**: CLI, a LAN web drop box, email (Postmark inbound, polled).
