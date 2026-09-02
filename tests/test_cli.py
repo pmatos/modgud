@@ -1,6 +1,7 @@
 import json
 import re
 import subprocess
+import sys
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -10,7 +11,15 @@ from pathlib import Path
 import pytest
 
 from modgud.blobs import BlobStore
+from modgud.cli import main
 from modgud.database import connect
+from modgud.youtube import (
+    Caption,
+    CaptionRefusal,
+    Chapter,
+    ExtractedYouTube,
+    YoutubeFailure,
+)
 
 
 class _ResponseHandler(BaseHTTPRequestHandler):
@@ -175,6 +184,191 @@ def test_add_estimates_web_reading_time_from_extracted_text_not_markup(
 
     assert result.returncode == 0, result.stderr
     assert estimate == 60
+
+
+def test_add_youtube_stores_metadata_chapters_and_timestamped_captions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    url = "https://www.youtube.com/watch?v=video123"
+    captions = b"""WEBVTT
+
+00:00:01.000 --> 00:00:03.500
+The first useful claim.
+
+00:01:02.250 --> 00:01:05.000
+The supporting evidence.
+"""
+    chapters: tuple[Chapter, ...] = (
+        {"start_time": 0.0, "end_time": 62.0, "title": "The problem"},
+        {
+            "start_time": 62.0,
+            "end_time": 125.75,
+            "title": "A durable design",
+        },
+    )
+    extracted = ExtractedYouTube(
+        title="How Durable Queues Work",
+        channel="Systems Workshop",
+        duration_seconds=125.75,
+        chapters=chapters,
+        caption=Caption(language="en", kind="manual", content=captions),
+    )
+    monkeypatch.setattr("modgud.cli.extract_youtube", lambda captured_url: extracted)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["modgud", "--data-dir", str(tmp_path), "add", url],
+    )
+
+    main()
+
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item = connection.execute(
+            """
+            SELECT format, state, title, channel, source, duration_seconds,
+                   chapters, extracted_text_hash, time_to_value_seconds
+            FROM items
+            """
+        ).fetchone()
+        events = connection.execute(
+            "SELECT type, payload FROM events ORDER BY id"
+        ).fetchall()
+
+    assert capsys.readouterr().out == f"Added item 1: {url}\n"
+    assert item is not None
+    (
+        item_format,
+        state,
+        title,
+        channel,
+        source,
+        duration_seconds,
+        stored_chapters,
+        transcript_hash,
+        time_to_value_seconds,
+    ) = item
+    assert (
+        item_format,
+        state,
+        title,
+        channel,
+        source,
+        duration_seconds,
+        json.loads(stored_chapters),
+        time_to_value_seconds,
+    ) == (
+        "youtube",
+        "extracted",
+        "How Durable Queues Work",
+        "Systems Workshop",
+        "Systems Workshop",
+        125.75,
+        list(chapters),
+        126,
+    )
+    assert BlobStore(tmp_path / "blobs").get(transcript_hash) == captions
+    assert [event[0] for event in events] == ["captured", "extracted"]
+    extraction = json.loads(events[-1][1])
+    assert (extraction["caption_language"], extraction["caption_kind"]) == (
+        "en",
+        "manual",
+    )
+
+
+def test_add_youtube_records_caption_refusal_as_a_distinct_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    url = "https://www.youtube.com/watch?v=video123"
+    extracted = ExtractedYouTube(
+        title="How Durable Queues Work",
+        channel="Systems Workshop",
+        duration_seconds=125.75,
+        chapters=(),
+        caption_refusal=CaptionRefusal(reason="Sign in to confirm you're not a bot"),
+    )
+    monkeypatch.setattr("modgud.cli.extract_youtube", lambda captured_url: extracted)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["modgud", "--data-dir", str(tmp_path), "add", url],
+    )
+
+    main()
+
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item = connection.execute(
+            """
+            SELECT state, title, channel, duration_seconds,
+                   extracted_text_hash, time_to_value_seconds
+            FROM items
+            """
+        ).fetchone()
+        events = connection.execute(
+            "SELECT type, payload FROM events ORDER BY id"
+        ).fetchall()
+
+    assert capsys.readouterr().out == f"Added item 1: {url}\n"
+    assert item == (
+        "captured",
+        "How Durable Queues Work",
+        "Systems Workshop",
+        125.75,
+        None,
+        126,
+    )
+    assert [event[0] for event in events] == ["captured", "caption_refused"]
+    refusal = json.loads(events[-1][1])
+    assert refusal == {
+        "reason": "Sign in to confirm you're not a bot",
+        "stage": "captions",
+    }
+
+
+def test_add_youtube_keeps_ordinary_caption_errors_on_the_failed_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    url = "https://www.youtube.com/watch?v=video123"
+    extracted = ExtractedYouTube(
+        title="How Durable Queues Work",
+        channel="Systems Workshop",
+        duration_seconds=125.75,
+        chapters=(),
+        failure=YoutubeFailure(
+            stage="captions",
+            reason="Unable to download subtitles: HTTP Error 500",
+        ),
+    )
+    monkeypatch.setattr("modgud.cli.extract_youtube", lambda captured_url: extracted)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["modgud", "--data-dir", str(tmp_path), "add", url],
+    )
+
+    main()
+
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item = connection.execute(
+            "SELECT state, duration_seconds, time_to_value_seconds FROM items"
+        ).fetchone()
+        events = connection.execute(
+            "SELECT type, payload FROM events ORDER BY id"
+        ).fetchall()
+
+    assert capsys.readouterr().out == f"Added item 1: {url}\n"
+    assert item == ("failed", 125.75, 126)
+    assert [event[0] for event in events] == ["captured", "failed"]
+    failure = json.loads(events[-1][1])
+    assert failure == {
+        "error": "Unable to download subtitles: HTTP Error 500",
+        "stage": "captions",
+    }
 
 
 def test_add_records_web_extraction_failure_without_rejecting_capture(

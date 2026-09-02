@@ -15,6 +15,7 @@ from modgud.extraction import ExtractionError, extract_web_page
 from modgud.formats import ItemFormat, detect_format
 from modgud.time_to_value import recompute_time_to_value
 from modgud.urls import canonicalize_url
+from modgud.youtube import ExtractedYouTube, extract_youtube
 
 _UNSUMMARIZABLE_FORMATS = frozenset(
     {ItemFormat.DECK, ItemFormat.PDF, ItemFormat.UNKNOWN}
@@ -69,9 +70,16 @@ def _record_extraction(
     *,
     item_id: int,
     extracted_text_hash: str,
+    caption_language: str | None = None,
+    caption_kind: str | None = None,
 ) -> None:
+    fields = {"extracted_text_hash": extracted_text_hash}
+    if caption_language is not None:
+        fields["caption_language"] = caption_language
+    if caption_kind is not None:
+        fields["caption_kind"] = caption_kind
     payload = json.dumps(
-        {"extracted_text_hash": extracted_text_hash},
+        fields,
         separators=(",", ":"),
         sort_keys=True,
     )
@@ -81,19 +89,58 @@ def _record_extraction(
     )
 
 
+def _youtube_manifest(
+    canonical_url: str,
+    extracted: ExtractedYouTube,
+) -> bytes:
+    return json.dumps(
+        {
+            "canonical_url": canonical_url,
+            "channel": extracted.channel,
+            "chapters": extracted.chapters,
+            "duration_seconds": extracted.duration_seconds,
+            "title": extracted.title,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
 def _record_extraction_failure(
     connection: sqlite3.Connection,
     *,
     item_id: int,
     error: str,
+    stage: str = "extraction",
 ) -> None:
     payload = json.dumps(
-        {"error": error, "stage": "extraction"},
+        {"error": error, "stage": stage},
         separators=(",", ":"),
         sort_keys=True,
     )
     connection.execute(
         "INSERT INTO events (item_id, type, payload) VALUES (?, 'failed', ?)",
+        (item_id, payload),
+    )
+
+
+def _record_caption_refusal(
+    connection: sqlite3.Connection,
+    *,
+    item_id: int,
+    reason: str,
+) -> None:
+    payload = json.dumps(
+        {"reason": reason, "stage": "captions"},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    connection.execute(
+        """
+        INSERT INTO events (item_id, type, payload)
+        VALUES (?, 'caption_refused', ?)
+        """,
         (item_id, payload),
     )
 
@@ -120,7 +167,15 @@ def _add(data_dir: Path, url: str) -> None:
             print(f"Existing item {item_id}: {canonical_url}")
             return
 
-    content, content_type, fetch_error = _fetch(url)
+    detected_format = detect_format(canonical_url)
+    extracted_youtube = None
+    if detected_format is ItemFormat.YOUTUBE:
+        extracted_youtube = extract_youtube(canonical_url)
+        content = _youtube_manifest(canonical_url, extracted_youtube)
+        content_type = None
+        fetch_error = None
+    else:
+        content, content_type, fetch_error = _fetch(url)
     blob_store = BlobStore(data_dir / "blobs")
     content_hash = blob_store.put(content)
     item_format = detect_format(
@@ -131,10 +186,32 @@ def _add(data_dir: Path, url: str) -> None:
     extracted_text_hash = None
     title = None
     author = None
+    channel = None
+    chapters = None
     extracted_site = None
     extraction_error = None
+    extraction_error_stage = "extraction"
     extracted_text = None
-    if fetch_error is None and item_format is ItemFormat.WEB:
+    caption_language = None
+    caption_kind = None
+    if extracted_youtube is not None:
+        title = extracted_youtube.title
+        channel = extracted_youtube.channel
+        author = extracted_youtube.channel
+        chapters = json.dumps(
+            extracted_youtube.chapters,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        if extracted_youtube.caption is not None:
+            extracted_text_hash = blob_store.put(extracted_youtube.caption.content)
+            caption_language = extracted_youtube.caption.language
+            caption_kind = extracted_youtube.caption.kind
+        if extracted_youtube.failure is not None:
+            extraction_error = extracted_youtube.failure.reason
+            extraction_error_stage = extracted_youtube.failure.stage
+    elif fetch_error is None and item_format is ItemFormat.WEB:
         try:
             extracted_page = extract_web_page(content, url=canonical_url)
         except ExtractionError as error:
@@ -162,6 +239,8 @@ def _add(data_dir: Path, url: str) -> None:
         source = canonical_url
     if extracted_site is not None:
         source = extracted_site
+    elif channel is not None:
+        source = channel
 
     with connect(database) as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -197,8 +276,11 @@ def _add(data_dir: Path, url: str) -> None:
                 state,
                 source,
                 title,
-                author
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                author,
+                channel,
+                duration_seconds,
+                chapters
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 canonical_url,
@@ -209,6 +291,11 @@ def _add(data_dir: Path, url: str) -> None:
                 source,
                 title,
                 author,
+                channel,
+                extracted_youtube.duration_seconds
+                if extracted_youtube is not None
+                else None,
+                chapters,
             ),
         )
         inserted_item_id = cursor.lastrowid
@@ -226,17 +313,30 @@ def _add(data_dir: Path, url: str) -> None:
                 connection,
                 item_id=inserted_item_id,
                 extracted_text_hash=extracted_text_hash,
-            )
-            recompute_time_to_value(
-                connection,
-                item_id=inserted_item_id,
-                extracted_text=extracted_text,
+                caption_language=caption_language,
+                caption_kind=caption_kind,
             )
         elif extraction_error is not None:
             _record_extraction_failure(
                 connection,
                 item_id=inserted_item_id,
                 error=extraction_error,
+                stage=extraction_error_stage,
+            )
+        if (
+            extracted_youtube is not None
+            and extracted_youtube.caption_refusal is not None
+        ):
+            _record_caption_refusal(
+                connection,
+                item_id=inserted_item_id,
+                reason=extracted_youtube.caption_refusal.reason,
+            )
+        if extracted_text_hash is not None or extracted_youtube is not None:
+            recompute_time_to_value(
+                connection,
+                item_id=inserted_item_id,
+                extracted_text=extracted_text,
             )
 
     print(f"Added item {inserted_item_id}: {canonical_url}")
