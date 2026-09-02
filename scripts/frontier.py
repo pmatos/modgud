@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
 """Sync the `agent-ready` eligibility label to the dependency frontier.
 
-An issue is eligible when every issue named in its `Blocked by` section is
-closed. Symphonika's issue_filters select on `agent-ready`, so this is what
-decides which tickets the daemon may pick up.
+An issue is eligible when every issue it is blocked by (GitHub native
+dependencies, written by sync-deps.py) is closed. Symphonika's issue_filters
+select on `agent-ready`, so this is what decides which tickets the daemon may
+pick up.
 
 Run after merges to advance the frontier. Idempotent; --dry-run to preview.
 """
 
 import argparse
 import json
-import re
 import subprocess
 import sys
 
 REPO = "pmatos/modgud"
 LABEL = "agent-ready"
-BLOCKED_BY = re.compile(
-    r"##\s*Blocked by\s*(.*?)(?:\n##|\Z)", re.DOTALL | re.IGNORECASE
-)
-REF = re.compile(r"#(\d+)")
 
 
 def gh(*args: str) -> str:
@@ -28,9 +24,10 @@ def gh(*args: str) -> str:
     ).stdout
 
 
-def blockers(body: str) -> set[int]:
-    m = BLOCKED_BY.search(body or "")
-    return {int(n) for n in REF.findall(m.group(1))} if m else set()
+def blockers(number: int) -> set[int]:
+    """Native blocked-by edges, which are what GitHub and Symphonika both see."""
+    out = gh("api", f"repos/{REPO}/issues/{number}/dependencies/blocked_by")
+    return {d["number"] for d in json.loads(out or "[]")}
 
 
 def main() -> int:
@@ -49,7 +46,7 @@ def main() -> int:
             "--limit",
             "500",
             "--json",
-            "number,title,body,state,labels",
+            "number,title,state,labels",
         )
     )
     state = {i["number"]: i["state"].upper() for i in issues}
@@ -58,7 +55,7 @@ def main() -> int:
     for i in issues:
         if state[i["number"]] != "OPEN":
             continue
-        deps = blockers(i["body"])
+        deps = blockers(i["number"])
         unknown = deps - state.keys()
         if unknown:
             print(
@@ -66,7 +63,7 @@ def main() -> int:
             )
         open_deps = sorted(d for d in deps if state.get(d, "OPEN") == "OPEN")
         eligible = not open_deps
-        labelled = LABEL in {l["name"] for l in i["labels"]}
+        labelled = LABEL in {label["name"] for label in i["labels"]}
         if eligible != labelled:
             changes.append((i["number"], i["title"], eligible, open_deps))
 
