@@ -55,6 +55,16 @@ overlapping searches do not enqueue the same email twice. Search and detail API
 calls retry with bounded exponential backoff; the last successful poll time is
 only advanced after the complete search succeeds.
 
+Queued mail is resolved deterministically: the first absolute HTTP(S) URL in
+the plain-text body wins, with HTML link/text order used only when plain text
+contains no usable URL. A forwarded envelope's sender is the capture origin;
+otherwise the message's `List-Id` or sender mailbox is used, in that order.
+The content's own site remains the item's separate `source`. Messages with no
+usable URL stay in the inbound table with nullable URL and origin fields and a
+processed timestamp. Usable URLs run through the same item pipeline as
+`modgud add`, while their capture events record the origin and Postmark message
+ID for provenance.
+
 ## Configuration
 
 modgud reads one TOML file at process startup. Copy the committed example to

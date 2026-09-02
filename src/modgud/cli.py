@@ -15,7 +15,7 @@ from modgud.config import ConfigError, Settings, default_config_path, get_settin
 from modgud.database import connect
 from modgud.extraction import ExtractionError, extract_web_page
 from modgud.formats import ItemFormat, detect_format
-from modgud.inbound import PostmarkClient, poll_inbound
+from modgud.inbound import PostmarkClient, pending_inbound_captures, poll_inbound
 from modgud.podcasts import (
     PodcastEpisode,
     PodcastFeedError,
@@ -55,14 +55,18 @@ def _record_capture(
     item_id: int,
     url: str,
     canonical_url: str,
+    origin: str | None,
+    inbound_message_id: str | None = None,
     fetch_error: str | None = None,
     podcast: PodcastEpisode | None = None,
 ) -> None:
     fields = {
         "canonical_url": canonical_url,
-        "origin": "manual",
+        "origin": origin,
         "url": url,
     }
+    if inbound_message_id is not None:
+        fields["inbound_message_id"] = inbound_message_id
     if fetch_error is not None:
         fields["fetch_error"] = fetch_error
     if podcast is not None:
@@ -77,6 +81,42 @@ def _record_capture(
         "INSERT INTO events (item_id, type, payload) VALUES (?, 'captured', ?)",
         (item_id, payload),
     )
+
+
+def _inbound_was_processed(
+    connection: sqlite3.Connection,
+    message_id: str,
+) -> bool:
+    row = connection.execute(
+        """
+        SELECT processed_at
+        FROM postmark_inbound_messages
+        WHERE message_id = ?
+        """,
+        (message_id,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(f"Inbound message is not queued: {message_id}")
+    return row[0] is not None
+
+
+def _mark_inbound_processed(
+    connection: sqlite3.Connection,
+    *,
+    message_id: str,
+    item_id: int,
+) -> None:
+    updated = connection.execute(
+        """
+        UPDATE postmark_inbound_messages
+        SET item_id = ?,
+            processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE message_id = ? AND processed_at IS NULL
+        """,
+        (item_id, message_id),
+    )
+    if updated.rowcount != 1:
+        raise RuntimeError(f"Inbound message was processed concurrently: {message_id}")
 
 
 def _record_extraction(
@@ -159,13 +199,24 @@ def _record_caption_refusal(
     )
 
 
-def _add(data_dir: Path, url: str, settings: Settings) -> None:
+def _add(
+    data_dir: Path,
+    url: str,
+    settings: Settings,
+    *,
+    origin: str | None = "manual",
+    inbound_message_id: str | None = None,
+) -> None:
     try:
         canonical_url = canonicalize_url(url)
     except ValueError:
         canonical_url = url
     database = data_dir / "modgud.sqlite3"
     with connect(database) as connection:
+        if inbound_message_id is not None:
+            connection.execute("BEGIN IMMEDIATE")
+            if _inbound_was_processed(connection, inbound_message_id):
+                return
         existing = connection.execute(
             "SELECT id FROM items WHERE canonical_url = ?",
             (canonical_url,),
@@ -177,7 +228,15 @@ def _add(data_dir: Path, url: str, settings: Settings) -> None:
                 item_id=item_id,
                 url=url,
                 canonical_url=canonical_url,
+                origin=origin,
+                inbound_message_id=inbound_message_id,
             )
+            if inbound_message_id is not None:
+                _mark_inbound_processed(
+                    connection,
+                    message_id=inbound_message_id,
+                    item_id=item_id,
+                )
             print(f"Existing item {item_id}: {canonical_url}")
             return
 
@@ -304,6 +363,10 @@ def _add(data_dir: Path, url: str, settings: Settings) -> None:
 
     with connect(database) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        if inbound_message_id is not None and _inbound_was_processed(
+            connection, inbound_message_id
+        ):
+            return
         existing = connection.execute(
             """
             SELECT id, canonical_url
@@ -322,8 +385,16 @@ def _add(data_dir: Path, url: str, settings: Settings) -> None:
                 item_id=item_id,
                 url=url,
                 canonical_url=canonical_url,
+                origin=origin,
+                inbound_message_id=inbound_message_id,
                 podcast=extracted_podcast,
             )
+            if inbound_message_id is not None:
+                _mark_inbound_processed(
+                    connection,
+                    message_id=inbound_message_id,
+                    item_id=item_id,
+                )
             print(f"Existing item {item_id}: {existing_url}")
             return
 
@@ -365,6 +436,8 @@ def _add(data_dir: Path, url: str, settings: Settings) -> None:
             item_id=inserted_item_id,
             url=url,
             canonical_url=canonical_url,
+            origin=origin,
+            inbound_message_id=inbound_message_id,
             fetch_error=fetch_error,
             podcast=extracted_podcast,
         )
@@ -401,6 +474,12 @@ def _add(data_dir: Path, url: str, settings: Settings) -> None:
                 connection,
                 item_id=inserted_item_id,
                 extracted_text=extracted_text,
+            )
+        if inbound_message_id is not None:
+            _mark_inbound_processed(
+                connection,
+                message_id=inbound_message_id,
+                item_id=inserted_item_id,
             )
 
     if item_format is ItemFormat.WEB and extracted_text_hash is not None:
@@ -512,6 +591,14 @@ def main() -> None:
             now=datetime.now(UTC),
             force=arguments.force,
         )
+        for pending in pending_inbound_captures(data_dir / "modgud.sqlite3"):
+            _add(
+                data_dir,
+                pending.target_url,
+                settings,
+                origin=pending.origin,
+                inbound_message_id=pending.message_id,
+            )
         if result.skipped:
             print("Inbound poll is not due yet")
         else:
