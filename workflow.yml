@@ -1,0 +1,147 @@
+workflow:
+  name: modgud_issue_to_merge
+  initial: implement
+  states:
+    # Implementation. The provider reads WORKFLOW.md, implements the issue
+    # test-first, opens the PR, removes agent-ready, exits 0.
+    #
+    # branch_ahead_of_base guards the empty-success case: a provider that
+    # exits 0 having committed nothing has not implemented anything, so it
+    # must not advance into the review states.
+    implement:
+      action:
+        kind: agent
+        provider: codex
+        prompt: WORKFLOW.md
+      transitions:
+        - to: code_review_fix
+          when:
+            provider_success: true
+            branch_ahead_of_base: true
+        - to: failed
+
+    # Automated review pass on the freshly opened PR. Reached once per PR
+    # open: repairs below loop back to wait_for_pr, never through here, so a
+    # CI-failure -> autofix -> recheck cycle does not re-review each tick.
+    code_review_fix:
+      action:
+        kind: agent
+        provider: claude
+        prompt: prompts/code-review-fix.md
+      transitions:
+        - to: simplify
+          when:
+            provider_success: true
+        - to: failed
+
+    simplify:
+      action:
+        kind: agent
+        provider: claude
+        prompt: prompts/simplify.md
+      transitions:
+        - to: wait_for_pr
+          when:
+            provider_success: true
+        - to: failed
+
+    # Poll-driven park state, re-evaluated each daemon tick against the PR
+    # signal snapshot. Transitions are checked top-down and matching is
+    # strict equality, so ordering is the whole logic here.
+    #
+    # Every settled actionable signal combination must be named: a case this
+    # state does not cover is a case nothing covers, and the run parks
+    # forever waiting for a human to notice.
+    wait_for_pr:
+      action:
+        kind: wait
+      transitions:
+        # External-merge catch-all: a human pressing the merge button, or any
+        # other path that lands the PR outside this FSM. pr_merged is only
+        # true post-merge, so this never short-circuits the normal
+        # wait -> merge -> merged path.
+        - to: merged
+          when:
+            pr_merged: true
+        # Closed-unmerged escape. Signals omit `mergeable` for closed PRs and
+        # emit pr_merged only when merged, so without this a PR closed
+        # without merging would park forever on green checks or route into
+        # autofix on a dead branch. Must stay AFTER pr_merged so merged PRs
+        # still take the merged path.
+        - to: failed
+          when:
+            pr_open: false
+        - to: merge
+          when:
+            checks: success
+            mergeable: true
+            unresolved_review_threads: 0
+        - to: resolve_conflicts
+          when:
+            mergeable: false
+        - to: autofix
+          when:
+            checks: failure
+        # Reviewer feedback on an otherwise-green PR. Ordered last so a clean
+        # PR still merges and a broken one still repairs first. Without it the
+        # common shape -- green checks, one unresolved thread -- parks forever,
+        # because merge requires zero unresolved threads and autofix requires
+        # failing checks. The progress guard breaks the
+        # autofix -> wait_for_pr -> autofix cycle this opens once the
+        # observation stops changing.
+        - to: autofix
+          when:
+            has_unresolved_reviews: true
+
+    autofix:
+      action:
+        kind: agent
+        provider: claude
+        prompt: prompts/autofix-pr.md
+      transitions:
+        - to: wait_for_pr
+          when:
+            provider_success: true
+        - to: failed
+
+    resolve_conflicts:
+      action:
+        kind: agent
+        provider: claude
+        prompt: prompts/resolve-conflicts.md
+      transitions:
+        - to: wait_for_pr
+          when:
+            provider_success: true
+        - to: failed
+
+    # Policy-aware merge. Escape transitions cover the window between
+    # wait_for_pr's gate check and the next merge tick: a late check flip or a
+    # late conflict routes to the right repair state instead of parking.
+    #
+    # Deliberately no generic catch-all back to wait_for_pr: on a transient
+    # merge failure wait_for_pr's clean predicates would immediately
+    # re-advance here, looping.
+    merge:
+      action:
+        kind: merge_pr
+        method: squash
+      transitions:
+        - to: merged
+          when:
+            pr_merged: true
+        - to: failed
+          when:
+            pr_open: false
+        - to: resolve_conflicts
+          when:
+            mergeable: false
+        - to: autofix
+          when:
+            checks: failure
+
+    merged:
+      terminal: success
+
+    failed:
+      terminal: blocked
