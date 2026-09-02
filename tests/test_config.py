@@ -32,6 +32,8 @@ poll_interval_seconds = 120
 
 [digest]
 send_time = "07:00"
+from_address = "modgud@example.com"
+to_address = "reader@example.com"
 
 [web]
 bind = "127.0.0.1:8000"
@@ -56,6 +58,8 @@ def test_operator_settings_are_loaded_from_one_file(tmp_path: Path) -> None:
         settings.models["tier_1_summary"].model,
         settings.inbound_poll_interval,
         settings.digest_send_time,
+        settings.digest_from_address,
+        settings.digest_to_address,
         settings.web_bind.host,
         settings.web_bind.port,
         settings.label_token_lifetime,
@@ -65,6 +69,8 @@ def test_operator_settings_are_loaded_from_one_file(tmp_path: Path) -> None:
         "gemma4:26b-a4b",
         timedelta(minutes=2),
         time(7),
+        "modgud@example.com",
+        "reader@example.com",
         "127.0.0.1",
         8000,
         timedelta(days=90),

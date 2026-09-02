@@ -65,6 +65,41 @@ processed timestamp. Usable URLs run through the same item pipeline as
 `modgud add`, while their capture events record the origin and Postmark message
 ID for provenance.
 
+## Digest delivery
+
+Send the current digest immediately for a demo or manual run:
+
+```console
+POSTMARK_SERVER_TOKEN=... uv run modgud digest --now
+```
+
+Eligible items are rendered into HTML and plain-text bodies and submitted to
+Postmark's outbound message stream. An empty selection submits no request. A
+successful request appends one `digest_sent` event whose payload contains the
+complete item ID set and Postmark message ID; an exhausted request failure
+leaves the selection and event boundary unchanged for the next attempt.
+
+For scheduled delivery, install the committed user units and put the Postmark
+server token in the service environment:
+
+```console
+uv tool install .
+mkdir -p ~/.config/systemd/user ~/.config/modgud
+cp systemd/modgud-digest.service systemd/modgud-digest.timer \
+  ~/.config/systemd/user/
+printf 'POSTMARK_SERVER_TOKEN=replace-me\n' > ~/.config/modgud/environment
+chmod 600 ~/.config/modgud/environment
+systemctl --user daemon-reload
+systemctl --user enable --now modgud-digest.timer
+```
+
+The timer starts the one-shot `modgud digest` command once per minute; the
+command sends only at or after `[digest].send_time` in the machine's local time
+and completes that local day after either one successful send or an empty
+selection. This keeps the TOML setting authoritative and lets a failed send be
+retried on the next timer tick. `--now` bypasses the clock and daily schedule
+gate, but still sends nothing when the selection is empty.
+
 ## Configuration
 
 modgud reads one TOML file at process startup. Copy the committed example to
@@ -83,8 +118,10 @@ validates and caches the file once per process, so those entrypoints consume
 one settings object rather than maintaining separate configuration paths.
 
 The file controls the four OpenAI-compatible model routes, inbound-mail poll
-interval, digest send time, web bind host and port, and label-link token
-lifetime. A hosted model route sets `api_key_env` to an environment-variable
+interval, digest send time and addresses, web bind host and port, and
+label-link token lifetime. `digest.from_address` must be a confirmed Postmark
+sender signature; `digest.to_address` is the personal inbox that receives the
+digest. A hosted model route sets `api_key_env` to an environment-variable
 name; it never contains the key itself. For example:
 
 ```toml

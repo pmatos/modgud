@@ -200,6 +200,8 @@ class Settings:
     models: Mapping[str, ModelRoute]
     inbound_poll_interval: timedelta
     digest_send_time: time
+    digest_from_address: str
+    digest_to_address: str
     web_bind: WebBind
     label_token_lifetime: timedelta
     secrets: RuntimeSecrets
@@ -325,7 +327,12 @@ def _load_settings(path: Path) -> Settings:
         field="digest",
         path=path,
     )
-    _reject_unknown(digest, {"send_time"}, field="digest", path=path)
+    _reject_unknown(
+        digest,
+        {"from_address", "send_time", "to_address"},
+        field="digest",
+        path=path,
+    )
     digest_send_time = _clock_time(
         _require(
             digest,
@@ -334,6 +341,26 @@ def _load_settings(path: Path) -> Settings:
             path=path,
         ),
         field="digest.send_time",
+        path=path,
+    )
+    digest_from_address = _non_empty_string(
+        _require(
+            digest,
+            "from_address",
+            field="digest.from_address",
+            path=path,
+        ),
+        field="digest.from_address",
+        path=path,
+    )
+    digest_to_address = _non_empty_string(
+        _require(
+            digest,
+            "to_address",
+            field="digest.to_address",
+            path=path,
+        ),
+        field="digest.to_address",
         path=path,
     )
 
@@ -383,6 +410,8 @@ def _load_settings(path: Path) -> Settings:
         models=MappingProxyType(models),
         inbound_poll_interval=timedelta(seconds=poll_interval_seconds),
         digest_send_time=digest_send_time,
+        digest_from_address=digest_from_address,
+        digest_to_address=digest_to_address,
         web_bind=web_bind,
         label_token_lifetime=timedelta(days=token_lifetime_days),
         secrets=RuntimeSecrets(

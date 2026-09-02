@@ -1,0 +1,10 @@
+[Unit]
+Description=Send the modgud morning digest
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.config/modgud/environment
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+ExecStart=/usr/bin/env modgud digest

@@ -1,0 +1,11 @@
+[Unit]
+Description=Check whether the modgud morning digest is due
+
+[Timer]
+# The command gates delivery on [digest].send_time in config.toml.
+OnCalendar=*-*-* *:*:00
+Persistent=true
+Unit=modgud-digest.service
+
+[Install]
+WantedBy=timers.target
