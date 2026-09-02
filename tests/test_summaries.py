@@ -163,6 +163,237 @@ def test_extracted_web_item_gets_structured_summary_from_configured_route(
     assert extracted_text in json.dumps(request["messages"])
 
 
+def test_stored_youtube_transcript_gets_the_same_structured_summary(
+    tmp_path: Path,
+) -> None:
+    transcript = b"""WEBVTT
+
+00:00:01.000 --> 00:00:03.500
+Smaller deployments reduce recovery time.
+
+00:00:03.500 --> 00:00:06.000
+Reversible migrations limit operational risk.
+"""
+    expected = Tier1Summary(
+        one_liner="A talk on reducing deployment risk through smaller changes.",
+        claims=(
+            "Smaller deployments reduce recovery time.",
+            "Reversible migrations limit operational risk.",
+            "Deployment size is a practical reliability control.",
+        ),
+    )
+    model_output = json.dumps(
+        {"one_liner": expected.one_liner, "claims": expected.claims}
+    )
+    blob_store = BlobStore(tmp_path / "blobs")
+    transcript_hash = blob_store.put(transcript)
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source, chapters
+            ) VALUES (?, ?, ?, 'youtube', 'extracted', 'Systems Workshop', '[]')
+            """,
+            (
+                "https://www.youtube.com/watch?v=deployments",
+                "f" * 64,
+                transcript_hash,
+            ),
+        )
+        item_id = cursor.lastrowid
+        assert item_id is not None
+
+        with serve_completions(model_output) as (endpoint, handler):
+            result = summarize_item(
+                connection,
+                blob_store,
+                item_id,
+                settings=settings_for_summary_endpoint(tmp_path, endpoint),
+            )
+
+        stored = connection.execute(
+            "SELECT one_liner, claims FROM tier_1_summaries WHERE item_id = ?",
+            (item_id,),
+        ).fetchone()
+        state = connection.execute(
+            "SELECT state FROM items WHERE id = ?", (item_id,)
+        ).fetchone()[0]
+
+    assert result == expected
+    assert stored == (expected.one_liner, json.dumps(list(expected.claims)))
+    assert state == "summarized"
+    assert len(handler.requests) == 1
+    messages = json.dumps(handler.requests[0]["messages"])
+    assert "Smaller deployments reduce recovery time." in messages
+    assert "00:00:01.000" not in messages
+
+
+def test_long_transcript_summarizes_every_chunk_then_combines(tmp_path: Path) -> None:
+    first_text = "FIRST-SECTION " + "alpha evidence " * 260
+    second_text = "SECOND-SECTION " + "omega evidence " * 260
+    transcript = f"""WEBVTT
+
+00:00:00.000 --> 00:05:00.000
+{first_text}
+
+00:05:00.000 --> 00:10:00.000
+{second_text}
+""".encode()
+    first_one_liner = "The opening section presents the deployment problem."
+    first_chunk_summary = {
+        "one_liner": first_one_liner,
+        "claims": [
+            "Small deployments constrain the scope of failures.",
+            "Short feedback loops expose regressions sooner.",
+            "Operational risk rises with change size.",
+        ],
+    }
+    second_one_liner = "The closing section explains a reversible rollout process."
+    second_chunk_summary = {
+        "one_liner": second_one_liner,
+        "claims": [
+            "Expand-and-contract migrations preserve compatibility.",
+            "Rollback procedures need rehearsal before deployment.",
+            "Observability determines whether a rollout should continue.",
+        ],
+    }
+    expected = Tier1Summary(
+        one_liner="A talk on making deployments smaller and reversible.",
+        claims=(
+            "Small deployments constrain the scope of failures.",
+            "Short feedback loops expose regressions sooner.",
+            "Expand-and-contract migrations preserve compatibility.",
+            "Observability determines whether a rollout should continue.",
+        ),
+    )
+    final_output = {"one_liner": expected.one_liner, "claims": expected.claims}
+    blob_store = BlobStore(tmp_path / "blobs")
+    transcript_hash = blob_store.put(transcript)
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source, chapters
+            ) VALUES (?, ?, ?, 'youtube', 'extracted', 'Systems Workshop', '[]')
+            """,
+            (
+                "https://www.youtube.com/watch?v=long-deployments",
+                "1" * 64,
+                transcript_hash,
+            ),
+        )
+        item_id = cursor.lastrowid
+        assert item_id is not None
+
+        responses = (
+            json.dumps(first_chunk_summary),
+            json.dumps(second_chunk_summary),
+            json.dumps(final_output),
+        )
+        with serve_completions(*responses) as (endpoint, handler):
+            result = summarize_item(
+                connection,
+                blob_store,
+                item_id,
+                settings=settings_for_summary_endpoint(tmp_path, endpoint),
+            )
+
+    assert result == expected
+    assert len(handler.requests) == 3
+    request_messages = [json.dumps(request["messages"]) for request in handler.requests]
+    assert "FIRST-SECTION" in request_messages[0]
+    assert "SECOND-SECTION" not in request_messages[0]
+    assert "FIRST-SECTION" not in request_messages[1]
+    assert "SECOND-SECTION" in request_messages[1]
+    assert first_one_liner in request_messages[2]
+    assert second_one_liner in request_messages[2]
+
+
+def test_transcript_summary_respects_structural_chapter_chunks(tmp_path: Path) -> None:
+    transcript = b"""WEBVTT
+
+00:00:00.000 --> 00:00:01.000
+<c>OPENING &amp; context</c>
+
+00:00:02.000 --> 00:00:03.000
+<c>DESIGN claim</c>
+"""
+    chapters = [
+        {"start_time": 0.0, "end_time": 2.0, "title": "Opening"},
+        {"start_time": 2.0, "end_time": 4.0, "title": "Design"},
+    ]
+    opening = {
+        "one_liner": "The opening defines the operational problem.",
+        "claims": [
+            "Large releases make failures harder to isolate.",
+            "Delayed feedback increases recovery time.",
+            "Risk grows when changes cannot be reversed.",
+        ],
+    }
+    design = {
+        "one_liner": "The design chapter proposes a safer release process.",
+        "claims": [
+            "Small releases isolate failures.",
+            "Fast feedback reduces recovery time.",
+            "Reversible changes constrain operational risk.",
+        ],
+    }
+    expected = Tier1Summary(
+        one_liner="A talk proposing a safer release process.",
+        claims=(
+            "Small releases isolate failures.",
+            "Fast feedback reduces recovery time.",
+            "Reversible changes constrain operational risk.",
+        ),
+    )
+    blob_store = BlobStore(tmp_path / "blobs")
+    transcript_hash = blob_store.put(transcript)
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source, chapters
+            ) VALUES (?, ?, ?, 'youtube', 'extracted', 'Systems Workshop', ?)
+            """,
+            (
+                "https://www.youtube.com/watch?v=chaptered-deployments",
+                "2" * 64,
+                transcript_hash,
+                json.dumps(chapters),
+            ),
+        )
+        item_id = cursor.lastrowid
+        assert item_id is not None
+
+        responses = (
+            json.dumps(opening),
+            json.dumps(design),
+            json.dumps({"one_liner": expected.one_liner, "claims": expected.claims}),
+        )
+        with serve_completions(*responses) as (endpoint, handler):
+            result = summarize_item(
+                connection,
+                blob_store,
+                item_id,
+                settings=settings_for_summary_endpoint(tmp_path, endpoint),
+            )
+
+    assert result == expected
+    assert len(handler.requests) == 3
+    request_messages = [json.dumps(request["messages"]) for request in handler.requests]
+    assert "OPENING & context" in request_messages[0]
+    assert "DESIGN claim" not in request_messages[0]
+    assert "OPENING & context" not in request_messages[1]
+    assert "DESIGN claim" in request_messages[1]
+    assert all(
+        "00:00:" not in messages and "<c>" not in messages
+        for messages in request_messages[:2]
+    )
+
+
 def test_malformed_model_output_is_retried(tmp_path: Path) -> None:
     expected = Tier1Summary(
         one_liner="An article about keeping database migrations reversible.",
