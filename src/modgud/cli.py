@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from modgud.blobs import BlobStore
+from modgud.config import ConfigError, default_config_path, get_settings
 from modgud.database import connect
 from modgud.extraction import ExtractionError, extract_web_page
 from modgud.formats import ItemFormat, detect_format
@@ -427,6 +428,12 @@ def main() -> None:
         description="Triage personal content.",
     )
     parser.add_argument(
+        "--config",
+        type=Path,
+        default=default_config_path(),
+        help="path to the operator configuration file",
+    )
+    parser.add_argument(
         "--data-dir",
         type=Path,
         default=_default_data_dir(),
@@ -438,6 +445,10 @@ def main() -> None:
     subparsers.add_parser("list", help="list captured items")
 
     arguments = parser.parse_args()
+    try:
+        get_settings(arguments.config)
+    except ConfigError as error:
+        parser.error(str(error))
     data_dir: Path = arguments.data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
     if arguments.command == "add":

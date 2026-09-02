@@ -5,6 +5,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .env
+/config.toml
 *.db
 *.db-wal
 *.db-shm
