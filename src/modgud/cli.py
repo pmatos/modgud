@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from modgud.blobs import BlobStore
-from modgud.config import ConfigError, default_config_path, get_settings
+from modgud.config import ConfigError, Settings, default_config_path, get_settings
 from modgud.database import connect
 from modgud.extraction import ExtractionError, extract_web_page
 from modgud.formats import ItemFormat, detect_format
@@ -20,6 +20,7 @@ from modgud.podcasts import (
     discover_podcast_feed,
     parse_podcast_feed,
 )
+from modgud.summaries import summarize_item
 from modgud.time_to_value import recompute_time_to_value
 from modgud.urls import canonicalize_url
 from modgud.youtube import ExtractedYouTube, extract_youtube
@@ -156,7 +157,7 @@ def _record_caption_refusal(
     )
 
 
-def _add(data_dir: Path, url: str) -> None:
+def _add(data_dir: Path, url: str, settings: Settings) -> None:
     try:
         canonical_url = canonicalize_url(url)
     except ValueError:
@@ -400,6 +401,15 @@ def _add(data_dir: Path, url: str) -> None:
                 extracted_text=extracted_text,
             )
 
+    if item_format is ItemFormat.WEB and extracted_text_hash is not None:
+        with connect(database) as connection:
+            summarize_item(
+                connection,
+                blob_store,
+                inserted_item_id,
+                settings=settings,
+            )
+
     print(f"Added item {inserted_item_id}: {canonical_url}")
 
 
@@ -419,6 +429,20 @@ def _list(data_dir: Path) -> None:
     print(f"{'id':<4} {'format':<10} {'source':<24} captured-at")
     for item_id, item_format, source, captured_at in items:
         print(f"{item_id:<4} {item_format:<10} {source:<24} {captured_at}")
+
+
+def _summarize(data_dir: Path, item_id: int, settings: Settings) -> None:
+    with connect(data_dir / "modgud.sqlite3") as connection:
+        summary = summarize_item(
+            connection,
+            BlobStore(data_dir / "blobs"),
+            item_id,
+            settings=settings,
+        )
+    if summary is None:
+        print(f"Failed to summarize item {item_id}")
+    else:
+        print(f"Summarized item {item_id}")
 
 
 def main() -> None:
@@ -443,15 +467,22 @@ def main() -> None:
     add_parser = subparsers.add_parser("add", help="capture a URL")
     add_parser.add_argument("url")
     subparsers.add_parser("list", help="list captured items")
+    summarize_parser = subparsers.add_parser(
+        "summarize",
+        help="generate or replace an item's tier-1 summary",
+    )
+    summarize_parser.add_argument("item_id", type=int)
 
     arguments = parser.parse_args()
     try:
-        get_settings(arguments.config)
+        settings = get_settings(arguments.config)
     except ConfigError as error:
         parser.error(str(error))
     data_dir: Path = arguments.data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
     if arguments.command == "add":
-        _add(data_dir, arguments.url)
-    else:
+        _add(data_dir, arguments.url, settings)
+    elif arguments.command == "list":
         _list(data_dir)
+    else:
+        _summarize(data_dir, arguments.item_id, settings)

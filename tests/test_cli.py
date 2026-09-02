@@ -28,16 +28,32 @@ from modgud.youtube import (
 def operator_configuration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+) -> Iterator[None]:
+    class SummaryHandler(_SummaryResponseHandler):
+        pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SummaryHandler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
     config_home = tmp_path / "config-home"
     config_dir = config_home / "modgud"
     config_dir.mkdir(parents=True)
     example = Path(__file__).parents[1] / "config.example.toml"
     (config_dir / "config.toml").write_text(
-        example.read_text(encoding="utf-8"),
+        example.read_text(encoding="utf-8").replace(
+            'base_url = "http://127.0.0.1:11434/v1"',
+            f'base_url = "http://127.0.0.1:{server.server_address[1]}/v1"',
+            1,
+        ),
         encoding="utf-8",
     )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    try:
+        yield
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
 
 
 class _ResponseHandler(BaseHTTPRequestHandler):
@@ -73,6 +89,44 @@ class _RouteResponseHandler(_ResponseHandler):
         self.send_header("Content-Type", content_type)
         self.end_headers()
         self.wfile.write(body)
+
+
+class _SummaryResponseHandler(_ResponseHandler):
+    def do_POST(self) -> None:
+        content_length = int(self.headers["Content-Length"])
+        request = json.loads(self.rfile.read(content_length))
+        response = json.dumps(
+            {
+                "id": "test-summary",
+                "object": "chat.completion",
+                "created": 0,
+                "model": request["model"],
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps(
+                                {
+                                    "one_liner": "A compact description of the article.",
+                                    "claims": [
+                                        "The article makes its first claim.",
+                                        "The article makes its second claim.",
+                                        "The article makes its third claim.",
+                                    ],
+                                }
+                            ),
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response)
 
 
 @contextmanager
@@ -255,14 +309,14 @@ def test_add_extracts_a_web_post_and_records_its_metadata(tmp_path: Path) -> Non
     extracted_text_hash, state, title, author, source = item
     extracted_text = BlobStore(tmp_path / "blobs").get(extracted_text_hash).decode()
     assert (state, title, author, source) == (
-        "extracted",
+        "summarized",
         "Keeping State Small",
         "Sam Lee",
         "Engineering Notes",
     )
     assert "Small state spaces make failures easier to understand" in extracted_text
     assert "Share this article everywhere" not in extracted_text
-    assert event_types == ["captured", "extracted"]
+    assert event_types == ["captured", "extracted", "summarized"]
 
 
 def test_add_estimates_web_reading_time_from_extracted_text_not_markup(

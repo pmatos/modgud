@@ -26,6 +26,14 @@ The installed command exposes its available options through standard CLI help:
 uv run modgud --help
 ```
 
+Adding a web page extracts and summarizes it immediately. Regenerate the
+current tier-1 artifact for an extracted web item by id when changing models or
+prompts:
+
+```console
+uv run modgud summarize 42
+```
+
 ## Configuration
 
 modgud reads one TOML file at process startup. Copy the committed example to
@@ -88,7 +96,10 @@ nullable `extracted_text_hash` references extracted text when available.
 `duration_seconds` retains audio/video metadata, while the nullable
 `time_to_value_seconds` stores the digest-ready estimate. Text estimates use
 the extracted text at 200 words per minute; audio/video estimates use duration,
-and missing inputs leave the estimate unknown.
+and missing inputs leave the estimate unknown. The current tier-1 artifact is
+stored in `tier_1_summaries` as a separate one-liner and JSON claim array;
+regeneration replaces that row while append-only events retain generation
+history.
 
 ## Shape
 

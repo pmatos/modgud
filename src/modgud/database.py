@@ -9,6 +9,7 @@ _MIGRATIONS = (
     Path(__file__).with_name("migrations") / "003_web_metadata.sql",
     Path(__file__).with_name("migrations") / "004_time_to_value.sql",
     Path(__file__).with_name("migrations") / "005_youtube_metadata.sql",
+    Path(__file__).with_name("migrations") / "006_tier_1_summaries.sql",
 )
 _SCHEMA_VERSION = len(_MIGRATIONS)
 
