@@ -26,6 +26,7 @@ def test_systemd_service_runs_the_configured_transcription_endpoint() -> None:
     )
 
     assert "Type=simple" in service
+    assert "EnvironmentFile=-%h/.config/modgud/environment" in service
     assert "Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin" in service
     assert "ExecStart=/usr/bin/env modgud whisper-server" in service
     assert "WorkingDirectory=/tmp" in service

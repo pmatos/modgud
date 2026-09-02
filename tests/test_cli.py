@@ -199,23 +199,20 @@ def test_help_describes_the_command() -> None:
     assert "usage: modgud" in result.stdout
 
 
-def test_whisper_server_uses_the_configured_route_model_and_threads(
-    tmp_path: Path,
-) -> None:
-    whisper_root = tmp_path / "whisper.cpp"
+def _write_fake_whisper_server(whisper_root: Path, script: str) -> None:
     server = whisper_root / "build/bin/whisper-server"
     server.parent.mkdir(parents=True)
-    server.write_text(
-        "#!/usr/bin/python3\n"
-        "import json\n"
-        "import sys\n"
-        "print(json.dumps(sys.argv[1:]))\n",
-        encoding="utf-8",
-    )
+    server.write_text(script, encoding="utf-8")
     server.chmod(0o755)
-    model = whisper_root / "models/ggml-tiny.en.bin"
-    model.parent.mkdir()
-    model.write_bytes(b"known test model")
+
+
+def _write_whisper_config(
+    tmp_path: Path,
+    whisper_root: Path,
+    *,
+    model_size: str = "large-v3-turbo",
+    threads: int = 12,
+) -> Path:
     example = Path(__file__).parents[1] / "config.example.toml"
     config_path = tmp_path / "config.toml"
     config_path.write_text(
@@ -224,9 +221,32 @@ def test_whisper_server_uses_the_configured_route_model_and_threads(
             'root = "~/.local/share/modgud/whisper.cpp"',
             f'root = "{whisper_root}"',
         )
-        .replace('model_size = "large-v3-turbo"', 'model_size = "tiny.en"')
-        .replace("threads = 12", "threads = 7"),
+        .replace(
+            'model_size = "large-v3-turbo"',
+            f'model_size = "{model_size}"',
+        )
+        .replace("threads = 12", f"threads = {threads}"),
         encoding="utf-8",
+    )
+    return config_path
+
+
+def test_whisper_server_uses_the_configured_route_model_and_threads(
+    tmp_path: Path,
+) -> None:
+    whisper_root = tmp_path / "whisper.cpp"
+    _write_fake_whisper_server(
+        whisper_root,
+        "#!/usr/bin/python3\n"
+        "import json\n"
+        "import sys\n"
+        "print(json.dumps(sys.argv[1:]))\n",
+    )
+    model = whisper_root / "models/ggml-tiny.en.bin"
+    model.parent.mkdir()
+    model.write_bytes(b"known test model")
+    config_path = _write_whisper_config(
+        tmp_path, whisper_root, model_size="tiny.en", threads=7
     )
     data_dir = tmp_path / "data"
 
@@ -260,19 +280,8 @@ def test_whisper_server_names_a_model_that_has_not_been_downloaded(
     tmp_path: Path,
 ) -> None:
     whisper_root = tmp_path / "whisper.cpp"
-    server = whisper_root / "build/bin/whisper-server"
-    server.parent.mkdir(parents=True)
-    server.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    server.chmod(0o755)
-    example = Path(__file__).parents[1] / "config.example.toml"
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        example.read_text(encoding="utf-8").replace(
-            'root = "~/.local/share/modgud/whisper.cpp"',
-            f'root = "{whisper_root}"',
-        ),
-        encoding="utf-8",
-    )
+    _write_fake_whisper_server(whisper_root, "#!/bin/sh\nexit 0\n")
+    config_path = _write_whisper_config(tmp_path, whisper_root)
     expected_model = whisper_root / "models/ggml-large-v3-turbo.bin"
 
     result = run_modgud(
