@@ -1,3 +1,4 @@
+import json
 import re
 import subprocess
 import threading
@@ -6,6 +7,9 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import pytest
+
+from modgud.blobs import BlobStore
 from modgud.database import connect
 
 
@@ -13,10 +17,11 @@ class _ResponseHandler(BaseHTTPRequestHandler):
     body = b""
     content_type = "application/octet-stream"
     request_count = 0
+    status = 200
 
     def do_GET(self) -> None:
         type(self).request_count += 1
-        self.send_response(200)
+        self.send_response(type(self).status)
         self.send_header("Content-Type", type(self).content_type)
         self.end_headers()
         self.wfile.write(type(self).body)
@@ -30,6 +35,7 @@ def serve(
     body: bytes,
     *,
     content_type: str = "application/octet-stream",
+    status: int = 200,
 ) -> Iterator[tuple[str, type[_ResponseHandler]]]:
     class Handler(_ResponseHandler):
         pass
@@ -37,6 +43,7 @@ def serve(
     Handler.body = body
     Handler.content_type = content_type
     Handler.request_count = 0
+    Handler.status = status
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever)
     thread.start()
@@ -95,6 +102,79 @@ def test_add_captures_one_item_and_its_raw_content(tmp_path: Path) -> None:
     )
     assert len(listed.stdout.splitlines()) == 2
     assert stored_blobs == [raw_content]
+
+
+@pytest.mark.parametrize(
+    ("content_type", "raw_content", "expected_format"),
+    [
+        ("application/octet-stream", b"\x00\x01opaque source material", "unknown"),
+        ("application/pdf", b"%PDF-1.7\nsource", "pdf"),
+        (
+            "application/vnd.ms-powerpoint",
+            b"legacy presentation bytes",
+            "deck",
+        ),
+    ],
+)
+def test_add_accepts_unsupported_formats_as_unsummarizable(
+    tmp_path: Path,
+    content_type: str,
+    raw_content: bytes,
+    expected_format: str,
+) -> None:
+    with serve(raw_content, content_type=content_type) as (url, _):
+        result = run_modgud(tmp_path, "add", url)
+
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item = connection.execute(
+            "SELECT content_hash, format, state FROM items"
+        ).fetchone()
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"Added item 1: {url}\n"
+    assert item is not None
+    content_hash, item_format, state = item
+    assert (item_format, state) == (expected_format, "unsummarizable")
+    assert BlobStore(tmp_path / "blobs").get(content_hash) == raw_content
+
+
+@pytest.mark.parametrize("submitted", ["not a URL", "http://[invalid"])
+def test_add_preserves_malformed_input_instead_of_rejecting_it(
+    tmp_path: Path,
+    submitted: str,
+) -> None:
+    result = run_modgud(tmp_path, "add", submitted)
+
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item = connection.execute(
+            "SELECT canonical_url, content_hash, format, state FROM items"
+        ).fetchone()
+        event_payload = connection.execute("SELECT payload FROM events").fetchone()[0]
+
+    assert result.returncode == 0, result.stderr
+    assert item is not None
+    canonical_url, content_hash, item_format, state = item
+    assert (canonical_url, item_format, state) == (submitted, "unknown", "failed")
+    assert BlobStore(tmp_path / "blobs").get(content_hash) == submitted.encode()
+    assert json.loads(event_payload)["fetch_error"]
+
+
+def test_add_preserves_the_input_when_fetching_fails(tmp_path: Path) -> None:
+    with serve(b"temporarily unavailable", status=503) as (url, _):
+        result = run_modgud(tmp_path, "add", url)
+
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item = connection.execute(
+            "SELECT content_hash, format, state FROM items"
+        ).fetchone()
+        event_payload = connection.execute("SELECT payload FROM events").fetchone()[0]
+
+    assert result.returncode == 0, result.stderr
+    assert item is not None
+    content_hash, item_format, state = item
+    assert (item_format, state) == ("unknown", "failed")
+    assert BlobStore(tmp_path / "blobs").get(content_hash) == url.encode()
+    assert "HTTP Error 503" in json.loads(event_payload)["fetch_error"]
 
 
 def test_readding_a_known_url_records_a_capture_without_fetching_again(
