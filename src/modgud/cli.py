@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 from modgud.blobs import BlobStore
 from modgud.config import ConfigError, Settings, default_config_path, get_settings
 from modgud.database import connect
+from modgud.delivery import PostmarkEmailClient, deliver_digest
 from modgud.extraction import ExtractionError, extract_web_page
 from modgud.formats import ItemFormat, detect_format
 from modgud.inbound import PostmarkClient, pending_inbound_captures, poll_inbound
@@ -526,7 +527,7 @@ def _summarize(data_dir: Path, item_id: int, settings: Settings) -> None:
         print(f"Summarized item {item_id}")
 
 
-def main() -> None:
+def main(*, local_now: datetime | None = None) -> None:
     """Run the modgud command-line interface."""
     parser = argparse.ArgumentParser(
         prog="modgud",
@@ -562,6 +563,15 @@ def main() -> None:
         action="store_true",
         help="poll now even when the configured interval has not elapsed",
     )
+    digest_parser = subparsers.add_parser(
+        "digest",
+        help="send the morning digest through Postmark",
+    )
+    digest_parser.add_argument(
+        "--now",
+        action="store_true",
+        help="send immediately instead of waiting for the configured time",
+    )
 
     arguments = parser.parse_args()
     try:
@@ -573,6 +583,16 @@ def main() -> None:
         parser.error(
             "POSTMARK_SERVER_TOKEN is required to poll Postmark inbound messages"
         )
+    if arguments.command == "digest" and postmark_server_token is None:
+        parser.error("POSTMARK_SERVER_TOKEN is required to send the digest")
+    if arguments.command == "digest" and not arguments.now:
+        if local_now is None:
+            local_now = datetime.now().astimezone()
+        current_time = local_now.timetz().replace(tzinfo=None)
+        if current_time < settings.digest_send_time:
+            configured_time = settings.digest_send_time.strftime("%H:%M")
+            print(f"Digest is not due until {configured_time}")
+            return
     data_dir: Path = arguments.data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
     if arguments.command == "add":
@@ -581,10 +601,10 @@ def main() -> None:
         _list(data_dir)
     elif arguments.command == "summarize":
         _summarize(data_dir, arguments.item_id, settings)
-    else:
+    elif arguments.command == "poll-inbound":
         if postmark_server_token is None:
             raise AssertionError("Postmark token was validated before dispatch")
-        result = poll_inbound(
+        poll_result = poll_inbound(
             data_dir / "modgud.sqlite3",
             PostmarkClient(postmark_server_token),
             poll_interval=settings.inbound_poll_interval,
@@ -599,7 +619,30 @@ def main() -> None:
                 origin=pending.origin,
                 inbound_message_id=pending.message_id,
             )
-        if result.skipped:
+        if poll_result.skipped:
             print("Inbound poll is not due yet")
         else:
-            print(f"Polled Postmark: {result.new_message_count} new inbound messages")
+            print(
+                f"Polled Postmark: {poll_result.new_message_count} new inbound messages"
+            )
+    else:
+        if postmark_server_token is None:
+            raise AssertionError("Postmark token was validated before dispatch")
+        if arguments.now:
+            scheduled_for = None
+        else:
+            if local_now is None:
+                raise AssertionError("Scheduled digest time was initialized")
+            scheduled_for = local_now.date()
+        digest_result = deliver_digest(
+            data_dir / "modgud.sqlite3",
+            PostmarkEmailClient(postmark_server_token),
+            from_address=settings.digest_from_address,
+            to_address=settings.digest_to_address,
+            scheduled_for=scheduled_for,
+        )
+        if digest_result.sent:
+            item_label = "item" if len(digest_result.item_ids) == 1 else "items"
+            print(f"Sent digest with {len(digest_result.item_ids)} {item_label}")
+        else:
+            print("No digest items to send")

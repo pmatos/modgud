@@ -5,6 +5,7 @@ import sys
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import ClassVar
@@ -15,6 +16,7 @@ import pytest
 from modgud.blobs import BlobStore
 from modgud.cli import main
 from modgud.database import connect
+from modgud.delivery import DigestEmail, PostmarkEmailClient
 from modgud.youtube import (
     Caption,
     CaptionRefusal,
@@ -626,6 +628,104 @@ def test_invalid_podcast_duration_does_not_reject_the_episode(tmp_path: Path) ->
 
     assert result.returncode == 0, result.stderr
     assert item == ("captured", None, None)
+
+
+def test_digest_now_sends_the_current_selection_immediately(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, format, state, source, title
+            ) VALUES (
+                'https://example.com/digest', 'digest-content', 'web',
+                'failed', 'example.com', 'Digest item'
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO events (item_id, type, payload) VALUES (?, 'captured', '{}')",
+            (item.lastrowid,),
+        )
+    sent_messages: list[DigestEmail] = []
+
+    def record_send(
+        _client: PostmarkEmailClient,
+        message: DigestEmail,
+    ) -> str:
+        sent_messages.append(message)
+        return "postmark-message-1"
+
+    monkeypatch.setenv("POSTMARK_SERVER_TOKEN", "server-token-secret")
+    monkeypatch.setattr(PostmarkEmailClient, "send_email", record_send)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["modgud", "--data-dir", str(tmp_path), "digest", "--now"],
+    )
+
+    main()
+
+    assert capsys.readouterr().out == "Sent digest with 1 item\n"
+    assert len(sent_messages) == 1
+    assert sent_messages[0].to_address == "reader@example.com"
+
+
+def test_scheduled_digest_does_nothing_before_the_configured_local_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, format, state, source
+            ) VALUES (
+                'https://example.com/later', 'later-content', 'web',
+                'failed', 'example.com'
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO events (item_id, type, payload) VALUES (?, 'captured', '{}')",
+            (item.lastrowid,),
+        )
+
+    def reject_send(
+        _client: PostmarkEmailClient,
+        _message: DigestEmail,
+    ) -> str:
+        raise AssertionError("email must not be sent before the configured time")
+
+    monkeypatch.setenv("POSTMARK_SERVER_TOKEN", "server-token-secret")
+    monkeypatch.setattr(PostmarkEmailClient, "send_email", reject_send)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["modgud", "--data-dir", str(tmp_path), "digest"],
+    )
+
+    main(
+        local_now=datetime(
+            2026,
+            9,
+            3,
+            6,
+            59,
+            tzinfo=timezone(timedelta(hours=2)),
+        )
+    )
+
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        sent_event_count = connection.execute(
+            "SELECT count(*) FROM events WHERE type = 'digest_sent'"
+        ).fetchone()[0]
+    assert capsys.readouterr().out == "Digest is not due until 07:00\n"
+    assert sent_event_count == 0
 
 
 def test_add_youtube_stores_metadata_chapters_and_timestamped_captions(

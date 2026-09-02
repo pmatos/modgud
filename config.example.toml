@@ -24,6 +24,9 @@ poll_interval_seconds = 120
 
 [digest]
 send_time = "07:00"
+# The From address must be a confirmed Postmark sender signature.
+from_address = "modgud@example.com"
+to_address = "reader@example.com"
 
 [web]
 bind = "127.0.0.1:8000"
