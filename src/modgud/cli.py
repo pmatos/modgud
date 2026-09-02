@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+from modgud.audio_fallbacks import run_audio_fallback_batch
 from modgud.blobs import BlobStore
 from modgud.config import ConfigError, Settings, default_config_path, get_settings
 from modgud.database import connect
@@ -577,6 +578,10 @@ def main(*, local_now: datetime | None = None) -> None:
         "whisper-server",
         help="run the configured local transcription endpoint",
     )
+    subparsers.add_parser(
+        "batch",
+        help="run scheduled audio/video processing",
+    )
 
     arguments = parser.parse_args()
     try:
@@ -611,6 +616,16 @@ def main(*, local_now: datetime | None = None) -> None:
         _list(data_dir)
     elif arguments.command == "summarize":
         _summarize(data_dir, arguments.item_id, settings)
+    elif arguments.command == "batch":
+        result = run_audio_fallback_batch(
+            data_dir / "modgud.sqlite3",
+            BlobStore(data_dir / "blobs"),
+            settings=settings,
+        )
+        print(
+            f"Audio fallback batch: {result.attempted} attempted, "
+            f"{result.transcribed} transcribed, {result.failed} failed"
+        )
     elif arguments.command == "poll-inbound":
         if postmark_server_token is None:
             raise AssertionError("Postmark token was validated before dispatch")

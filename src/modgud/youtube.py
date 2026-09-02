@@ -1,6 +1,7 @@
 """YouTube metadata and caption extraction through yt-dlp."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -135,6 +136,30 @@ def extract_youtube(
         caption_refusal=caption_refusal,
         failure=failure,
     )
+
+
+@contextmanager
+def download_youtube_audio(url: str) -> Iterator[Path]:
+    """Yield a temporary best-audio download and remove it on exit."""
+    with TemporaryDirectory(prefix="modgud-youtube-audio-") as temporary_directory:
+        options: dict[str, Any] = {
+            "format": "bestaudio/best",
+            "noplaylist": True,
+            "no_warnings": True,
+            "outtmpl": "%(id)s.%(ext)s",
+            "paths": {"home": temporary_directory},
+            "quiet": True,
+        }
+        with _default_youtube_dl_factory(options) as downloader:
+            downloader.extract_info(url, download=True)
+        audio_files = sorted(
+            path
+            for path in Path(temporary_directory).iterdir()
+            if path.is_file() and path.suffix != ".part"
+        )
+        if len(audio_files) != 1:
+            raise ValueError("yt-dlp did not write exactly one audio stream")
+        yield audio_files[0]
 
 
 def _is_caption_refusal(error: DownloadError) -> bool:

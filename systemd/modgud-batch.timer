@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the modgud media batch at 03:00
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+Unit=modgud-batch.service
+
+[Install]
+WantedBy=timers.target

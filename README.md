@@ -165,6 +165,51 @@ The service is sandboxed, restarts after failures, reads the same default
 config file, and exposes only the address selected by the transcription route.
 Stop and disable it before changing that route to a hosted provider.
 
+## Scheduled audio fallback
+
+YouTube capture attempts captions without downloading media. When YouTube
+refuses that request, the item stays queued in `captured`; it does not download
+audio or call transcription on the interactive `modgud add` path. Run the
+queued fallback by hand with:
+
+```console
+uv run modgud batch
+```
+
+The batch downloads each queued item's best audio stream into an isolated
+temporary directory, asks the configured `transcription` route for timestamped
+WebVTT, persists only that transcript, and removes the audio. A failed item is
+recorded without stopping later items in the same batch.
+
+Install the committed user timer to run this work at 03:00 with the lowest CPU
+and I/O priorities:
+
+```console
+uv tool install .
+mkdir -p ~/.config/systemd/user
+cp systemd/modgud-batch.service systemd/modgud-batch.timer \
+  ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now modgud-batch.timer
+systemctl --user list-timers modgud-batch.timer
+```
+
+Every attempt records an `audio_fallback` event whose `outcome` is
+`transcribed` or `failed`. The attempt rate across captured YouTube items is
+therefore directly measurable, for example:
+
+```sql
+SELECT round(
+    100.0 * count(DISTINCT events.item_id) / count(DISTINCT items.id),
+    1
+) AS fallback_percent
+FROM items
+LEFT JOIN events
+    ON events.item_id = items.id
+   AND events.type = 'audio_fallback'
+WHERE items.format = 'youtube';
+```
+
 ## Digest delivery
 
 Send the current digest immediately for a demo or manual run:
