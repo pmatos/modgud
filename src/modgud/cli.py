@@ -49,6 +49,23 @@ def _record_capture(
     )
 
 
+def _report_existing(
+    connection: sqlite3.Connection,
+    *,
+    item_id: int,
+    url: str,
+    canonical_url: str,
+    existing_url: str,
+) -> None:
+    _record_capture(
+        connection,
+        item_id=item_id,
+        url=url,
+        canonical_url=canonical_url,
+    )
+    print(f"Existing item {item_id}: {existing_url}")
+
+
 def _add(data_dir: Path, url: str) -> None:
     canonical_url = canonicalize_url(url)
     database = data_dir / "modgud.sqlite3"
@@ -58,14 +75,13 @@ def _add(data_dir: Path, url: str) -> None:
             (canonical_url,),
         ).fetchone()
         if existing is not None:
-            item_id = int(existing[0])
-            _record_capture(
+            _report_existing(
                 connection,
-                item_id=item_id,
+                item_id=int(existing[0]),
                 url=url,
                 canonical_url=canonical_url,
+                existing_url=canonical_url,
             )
-            print(f"Existing item {item_id}: {canonical_url}")
             return
 
     content, content_type = _fetch(url)
@@ -90,15 +106,13 @@ def _add(data_dir: Path, url: str) -> None:
             (canonical_url, content_hash),
         ).fetchone()
         if existing is not None:
-            item_id = int(existing[0])
-            existing_url = str(existing[1])
-            _record_capture(
+            _report_existing(
                 connection,
-                item_id=item_id,
+                item_id=int(existing[0]),
                 url=url,
                 canonical_url=canonical_url,
+                existing_url=str(existing[1]),
             )
-            print(f"Existing item {item_id}: {existing_url}")
             return
 
         cursor = connection.execute(
