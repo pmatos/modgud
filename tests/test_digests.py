@@ -10,6 +10,7 @@ import pytest
 from modgud.database import connect
 from modgud.digests import DigestItem, render_digest, select_digest_items
 from modgud.formats import ItemFormat
+from modgud.span_maps import Span, SpanMap
 from modgud.summaries import Tier1Summary
 
 
@@ -107,7 +108,7 @@ def test_orders_shortest_time_to_value_first_with_unknown_last(
     ]
 
 
-def test_selected_records_include_item_metadata_and_the_structured_summary(
+def test_selected_records_include_item_metadata_summary_and_span_map(
     event_log: sqlite3.Connection,
 ) -> None:
     item_id = _add_item(
@@ -140,6 +141,18 @@ def test_selected_records_include_item_metadata_and_the_structured_summary(
             ),
         ),
     )
+    event_log.execute("INSERT INTO span_maps (item_id) VALUES (?)", (item_id,))
+    event_log.executemany(
+        """
+        INSERT INTO span_map_spans (
+            item_id, position, start_ms, end_ms, description
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        [
+            (item_id, 0, 65_000, 95_000, "The core tradeoff is introduced."),
+            (item_id, 1, 3_725_000, 3_760_000, "The practical result is derived."),
+        ],
+    )
 
     selected = select_digest_items(event_log)
 
@@ -160,6 +173,20 @@ def test_selected_records_include_item_metadata_and_the_structured_summary(
                     "Feedback reduces uncertainty",
                     "Lower uncertainty improves later choices",
                 ),
+            ),
+            span_map=SpanMap(
+                spans=(
+                    Span(
+                        start_ms=65_000,
+                        end_ms=95_000,
+                        description="The core tradeoff is introduced.",
+                    ),
+                    Span(
+                        start_ms=3_725_000,
+                        end_ms=3_760_000,
+                        description="The practical result is derived.",
+                    ),
+                )
             ),
         ),
     )
@@ -245,6 +272,61 @@ def test_renders_one_complete_tier_1_item_as_html_and_plain_text() -> None:
     assert "<li>Short tasks provide feedback quickly.</li>" in rendered.html
     assert "<li>Feedback reduces uncertainty.</li>" in rendered.html
     assert "<li>Lower uncertainty improves later choices.</li>" in rendered.html
+
+
+def test_renders_a_timestamped_span_map_inline_after_youtube_claims() -> None:
+    item = DigestItem(
+        id=1,
+        canonical_url="https://www.youtube.com/watch?v=worthwhile",
+        format=ItemFormat.YOUTUBE,
+        state="summarized",
+        source="Practical Channel",
+        title="A worthwhile conversation",
+        author="Ada Rivera",
+        time_to_value_seconds=3_760,
+        summary=Tier1Summary(
+            one_liner="A conversation about making practical tradeoffs.",
+            claims=(
+                "Fast feedback improves decisions.",
+                "Explicit constraints reveal tradeoffs.",
+                "Small trials reduce risk.",
+            ),
+        ),
+        span_map=SpanMap(
+            spans=(
+                Span(
+                    start_ms=65_000,
+                    end_ms=95_000,
+                    description="The core tradeoff is introduced.",
+                ),
+                Span(
+                    start_ms=3_725_000,
+                    end_ms=3_760_000,
+                    description="The practical result is derived.",
+                ),
+            )
+        ),
+    )
+
+    rendered = render_digest((item,))
+
+    expected_text = """   - Small trials reduce risk.
+
+   Span map:
+   - 01:05–01:35 — The core tradeoff is introduced. — https://www.youtube.com/watch?v=worthwhile&t=65s
+   - 1:02:05–1:02:40 — The practical result is derived. — https://www.youtube.com/watch?v=worthwhile&t=3725s
+"""
+    assert expected_text in rendered.text
+    expected_html = (
+        "<li>Small trials reduce risk.</li></ul>"
+        "<h3>Span map</h3><ul>"
+        '<li><a href="https://www.youtube.com/watch?v=worthwhile&amp;t=65s">'
+        "01:05–01:35</a> — The core tradeoff is introduced.</li>"
+        '<li><a href="https://www.youtube.com/watch?v=worthwhile&amp;t=3725s">'
+        "1:02:05–1:02:40</a> — The practical result is derived.</li>"
+        "</ul>"
+    )
+    assert expected_html in rendered.html
 
 
 @pytest.mark.parametrize("state", ["failed", "unsummarizable"])
