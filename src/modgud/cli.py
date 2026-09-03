@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sqlite3
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from http.client import HTTPException
 from pathlib import Path
@@ -29,13 +30,21 @@ from modgud.span_maps import generate_span_map
 from modgud.summaries import summarize_item
 from modgud.time_to_value import recompute_time_to_value
 from modgud.urls import canonicalize_url
-from modgud.web import serve as serve_web_app
 from modgud.whisper_cpp import WhisperCppError, launch_server
 from modgud.youtube import ExtractedYouTube, extract_youtube
 
 _UNSUMMARIZABLE_FORMATS = frozenset(
     {ItemFormat.DECK, ItemFormat.PDF, ItemFormat.UNKNOWN}
 )
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureResult:
+    """The item identity and outcome produced by a capture attempt."""
+
+    item_id: int
+    canonical_url: str
+    created: bool
 
 
 def _default_data_dir() -> Path:
@@ -205,14 +214,14 @@ def _record_caption_refusal(
     )
 
 
-def _add(
+def capture_url(
     data_dir: Path,
     url: str,
-    settings: Settings,
+    settings: Settings | None,
     *,
     origin: str | None = "manual",
     inbound_message_id: str | None = None,
-) -> None:
+) -> CaptureResult | None:
     try:
         canonical_url = canonicalize_url(url)
     except ValueError:
@@ -222,7 +231,7 @@ def _add(
         if inbound_message_id is not None:
             connection.execute("BEGIN IMMEDIATE")
             if _inbound_was_processed(connection, inbound_message_id):
-                return
+                return None
         existing = connection.execute(
             "SELECT id FROM items WHERE canonical_url = ?",
             (canonical_url,),
@@ -243,8 +252,9 @@ def _add(
                     message_id=inbound_message_id,
                     item_id=item_id,
                 )
-            print(f"Existing item {item_id}: {canonical_url}")
-            return
+            result = CaptureResult(item_id, canonical_url, created=False)
+            print(f"Existing item {result.item_id}: {result.canonical_url}")
+            return result
 
     detected_format = detect_format(canonical_url)
     extracted_youtube = None
@@ -372,7 +382,7 @@ def _add(
         if inbound_message_id is not None and _inbound_was_processed(
             connection, inbound_message_id
         ):
-            return
+            return None
         existing = connection.execute(
             """
             SELECT id, canonical_url
@@ -401,8 +411,9 @@ def _add(
                     message_id=inbound_message_id,
                     item_id=item_id,
                 )
-            print(f"Existing item {item_id}: {existing_url}")
-            return
+            result = CaptureResult(item_id, existing_url, created=False)
+            print(f"Existing item {result.item_id}: {result.canonical_url}")
+            return result
 
         cursor = connection.execute(
             """
@@ -489,6 +500,8 @@ def _add(
             )
 
     if item_format is ItemFormat.WEB and extracted_text_hash is not None:
+        if settings is None:
+            settings = get_settings()
         with connect(database) as connection:
             summarize_item(
                 connection,
@@ -497,7 +510,9 @@ def _add(
                 settings=settings,
             )
 
-    print(f"Added item {inserted_item_id}: {canonical_url}")
+    result = CaptureResult(inserted_item_id, canonical_url, created=True)
+    print(f"Added item {result.item_id}: {result.canonical_url}")
+    return result
 
 
 def _list(data_dir: Path) -> None:
@@ -637,9 +652,11 @@ def main(*, local_now: datetime | None = None) -> None:
     data_dir: Path = arguments.data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
     if arguments.command == "serve":
+        from modgud.web import serve as serve_web_app
+
         serve_web_app(settings, data_dir)
     elif arguments.command == "add":
-        _add(data_dir, arguments.url, settings)
+        capture_url(data_dir, arguments.url, settings)
     elif arguments.command == "list":
         _list(data_dir)
     elif arguments.command == "summarize":
@@ -679,7 +696,7 @@ def main(*, local_now: datetime | None = None) -> None:
             force=arguments.force,
         )
         for pending in pending_inbound_captures(data_dir / "modgud.sqlite3"):
-            _add(
+            capture_url(
                 data_dir,
                 pending.target_url,
                 settings,

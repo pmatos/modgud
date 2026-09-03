@@ -1,9 +1,31 @@
 {% extends "base.html" %}
 
 {% block content %}
+  <section class="drop-box" aria-labelledby="drop-title">
+    <h1 id="drop-title">Drop something worth keeping.</h1>
+    <form action="/" method="post">
+      <label for="url">URL</label>
+      <div class="drop-controls">
+        <input id="url" name="url" type="url" required placeholder="https://…">
+        <button type="submit">Capture</button>
+      </div>
+    </form>
+    {% if capture_error %}
+      <p class="capture-error" role="alert">
+        Enter a complete HTTP or HTTPS URL.
+      </p>
+    {% elif captured_item %}
+      <p class="capture-notice" role="status">
+        {% if capture == "added" %}Captured{% else %}Already captured as{% endif %}
+        item {{ captured_item[0] }}:
+        <a href="{{ captured_item[1] }}">{{ captured_item[1] }}</a>
+      </p>
+    {% endif %}
+  </section>
+
   <section class="welcome" aria-labelledby="welcome-title">
     <div class="welcome-copy">
-      <h1 id="welcome-title">Make room for what matters.</h1>
+      <h2 id="welcome-title">Make room for what matters.</h2>
       <p>
         Your deliberately saved things live here, ready to become concise
         summaries and maps to the moments worth your time.
@@ -16,5 +38,75 @@
       <strong>{{ item_count }}</strong>
       <span>item{% if item_count != 1 %}s{% endif %} captured</span>
     </p>
+  </section>
+
+  <section class="library" aria-labelledby="library-title">
+    <div class="library-heading">
+      <div>
+        <h2 id="library-title">Captured items</h2>
+        <p>Newest capture first.</p>
+      </div>
+      <form class="filters" action="/" method="get">
+        <div class="filter-field">
+          <label for="format">Format</label>
+          <select id="format" name="format">
+            <option value="">All formats</option>
+            {% for item_format in item_formats %}
+              <option value="{{ item_format }}"{% if item_format == active_format %} selected{% endif %}>{{ item_format }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="filter-field">
+          <label for="state">State</label>
+          <select id="state" name="state">
+            <option value="">All states</option>
+            {% for item_state in item_states %}
+              <option value="{{ item_state }}"{% if item_state == active_state %} selected{% endif %}>{{ item_state }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <button type="submit">Filter</button>
+        {% if active_format or active_state %}<a class="clear-filters" href="/">Clear</a>{% endif %}
+      </form>
+    </div>
+    {% if items %}
+      <div class="item-table-wrap">
+        <table class="item-table">
+          <thead>
+            <tr>
+              <th scope="col">Item</th>
+              <th scope="col">Format</th>
+              <th scope="col">State</th>
+              <th scope="col">Captured at</th>
+              <th scope="col">Time to value</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in items %}
+              <tr>
+                <th scope="row">
+                  <a href="{{ item.canonical_url }}">{{ item.title }}</a>
+                  <span class="item-source">{{ item.source }}</span>
+                </th>
+                <td><span class="format-label">{{ item.item_format }}</span></td>
+                <td><span class="state-label state-{{ item.state }}">{{ item.state }}</span></td>
+                <td>
+                  <time datetime="{{ item.captured_at }}">{{ item.captured_at_label }}</time>
+                </td>
+                <td class="time-to-value">{{ item.time_to_value }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="empty-library">
+        {% if active_format or active_state %}
+          No items match these filters. <a href="/">Clear the filters</a>.
+        {% else %}
+          Nothing captured yet. Drop the first URL above.
+        {% endif %}
+      </p>
+    {% endif %}
   </section>
 {% endblock %}
