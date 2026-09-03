@@ -18,6 +18,7 @@ from modgud.delivery import PostmarkEmailClient, deliver_digest
 from modgud.extraction import ExtractionError, extract_web_page
 from modgud.formats import ItemFormat, detect_format
 from modgud.inbound import PostmarkClient, pending_inbound_captures, poll_inbound
+from modgud.podcast_transcripts import run_podcast_transcript_batch
 from modgud.podcasts import (
     PodcastEpisode,
     PodcastFeedError,
@@ -639,14 +640,26 @@ def main(*, local_now: datetime | None = None) -> None:
     elif arguments.command == "span-map":
         _span_map(data_dir, arguments.item_id, settings)
     elif arguments.command == "batch":
+        blob_store = BlobStore(data_dir / "blobs")
         result = run_audio_fallback_batch(
             data_dir / "modgud.sqlite3",
-            BlobStore(data_dir / "blobs"),
+            blob_store,
             settings=settings,
         )
         print(
             f"Audio fallback batch: {result.attempted} attempted, "
             f"{result.transcribed} transcribed, {result.failed} failed"
+        )
+        podcast_result = run_podcast_transcript_batch(
+            data_dir / "modgud.sqlite3",
+            blob_store,
+            settings=settings,
+        )
+        print(
+            f"Podcast transcript batch: {podcast_result.attempted} attempted, "
+            f"{podcast_result.feed_supplied} feed-supplied, "
+            f"{podcast_result.transcribed} transcribed, "
+            f"{podcast_result.failed} failed"
         )
     elif arguments.command == "poll-inbound":
         if postmark_server_token is None:

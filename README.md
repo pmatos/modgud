@@ -172,7 +172,7 @@ The service is sandboxed, restarts after failures, reads the same default
 config file, and exposes only the address selected by the transcription route.
 Stop and disable it before changing that route to a hosted provider.
 
-## Scheduled audio fallback
+## Scheduled audio/video processing
 
 YouTube capture attempts captions without downloading media. When YouTube
 refuses that request, the item stays queued in `captured`; it does not download
@@ -183,7 +183,13 @@ queued fallback by hand with:
 uv run modgud batch
 ```
 
-The batch downloads each queued item's best audio stream into an isolated
+For podcasts, the same batch first fetches the latest episode's
+`<podcast:transcript>`. It accepts WebVTT, SRT, Podcast Namespace JSON, HTML,
+and plain text, preferring WebVTT when the feed offers several formats and
+normalizing the selected transcript to WebVTT. When no usable creator
+transcript is available, it transcribes the episode's audio enclosure instead.
+
+Audio fallback downloads each queued item's audio stream into an isolated
 temporary directory, asks the configured `transcription` route for timestamped
 WebVTT, persists only that transcript, and removes the audio. A failed item is
 recorded without stopping later items in the same batch.
@@ -216,6 +222,11 @@ LEFT JOIN events
    AND events.type = 'audio_fallback'
 WHERE items.format = 'youtube';
 ```
+
+Each successfully extracted podcast records a `podcast_transcript` event with
+`source` set to `feed` or `audio`; feed events also retain the selected media
+type. This keeps the path taken queryable per episode without tying the storage
+model to a specific transcription provider.
 
 ## Digest delivery
 

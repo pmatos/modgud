@@ -14,10 +14,32 @@ from modgud.urls import canonicalize_url
 
 _ITUNES_NAMESPACE = "http://www.itunes.com/dtds/podcast-1.0.dtd"
 _ATOM_NAMESPACE = "http://www.w3.org/2005/Atom"
+_PODCAST_NAMESPACES = (
+    "https://podcastindex.org/namespace/1.0",
+    "https://github.com/Podcastindex-org/podcast-namespace/blob/main/docs/1.0.md",
+)
 
 
 class PodcastFeedError(ValueError):
     """Raised when fetched content is not a usable podcast feed."""
+
+
+@dataclass(frozen=True)
+class PodcastTranscript:
+    """One creator-supplied transcript linked by a podcast episode."""
+
+    url: str
+    media_type: str
+    language: str | None
+    rel: str | None
+
+
+@dataclass(frozen=True)
+class PodcastEpisodeResources:
+    """Transcript and audio links retained in a captured episode manifest."""
+
+    transcripts: tuple[PodcastTranscript, ...]
+    audio_url: str | None
 
 
 @dataclass(frozen=True)
@@ -31,6 +53,8 @@ class PodcastEpisode:
     author: str | None
     podcast_title: str | None
     duration_seconds: float | None
+    transcripts: tuple[PodcastTranscript, ...]
+    audio_url: str | None
     raw_content: bytes
 
 
@@ -56,6 +80,25 @@ def discover_podcast_feed(content: bytes, *, page_url: str) -> str | None:
     if parser.feed_url is None:
         return None
     return canonicalize_url(urljoin(page_url, parser.feed_url))
+
+
+def parse_podcast_episode_resources(content: bytes) -> PodcastEpisodeResources:
+    """Recover transcript and audio links from a captured episode manifest."""
+    try:
+        root = ElementTree.fromstring(content)
+    except ElementTree.ParseError as error:
+        raise PodcastFeedError("episode manifest is not XML") from error
+    if root.tag != "podcast-episode":
+        raise PodcastFeedError("content is not a podcast episode manifest")
+    feed_url = root.get("feed_url")
+    entries = list(root)
+    if not feed_url or len(entries) != 1:
+        raise PodcastFeedError("podcast episode manifest is incomplete")
+    entry = entries[0]
+    return PodcastEpisodeResources(
+        transcripts=_podcast_transcripts(entry, feed_url=feed_url),
+        audio_url=_episode_audio_url(entry, feed_url=feed_url),
+    )
 
 
 def parse_podcast_feed(
@@ -107,6 +150,14 @@ def parse_podcast_feed(
 
     feed_hash = sha256(canonical_feed_url.encode("utf-8")).hexdigest()
     canonical_url = f"podcast:{feed_hash}/{selected.guid}"
+    transcripts = _podcast_transcripts(
+        selected.raw_element,
+        feed_url=canonical_feed_url,
+    )
+    audio_url = _episode_audio_url(
+        selected.raw_element,
+        feed_url=canonical_feed_url,
+    )
     return PodcastEpisode(
         canonical_url=canonical_url,
         feed_url=canonical_feed_url,
@@ -115,6 +166,8 @@ def parse_podcast_feed(
         author=selected.author,
         podcast_title=podcast_title,
         duration_seconds=selected.duration_seconds,
+        transcripts=transcripts,
+        audio_url=audio_url,
         raw_content=_episode_manifest(
             selected,
             canonical_url=canonical_url,
@@ -222,6 +275,55 @@ def _atom_page_url(entry: ElementTree.Element) -> str | None:
     for link in entry.findall(f"{{{_ATOM_NAMESPACE}}}link"):
         if link.get("rel", "alternate") == "alternate" and link.get("href"):
             return link.get("href")
+    return None
+
+
+def _podcast_transcripts(
+    entry: ElementTree.Element,
+    *,
+    feed_url: str,
+) -> tuple[PodcastTranscript, ...]:
+    transcripts = []
+    for namespace in _PODCAST_NAMESPACES:
+        for transcript in entry.findall(f"{{{namespace}}}transcript"):
+            url = transcript.get("url")
+            media_type = transcript.get("type")
+            if not url or not media_type:
+                continue
+            transcripts.append(
+                PodcastTranscript(
+                    url=urljoin(feed_url, url),
+                    media_type=media_type.partition(";")[0].strip().lower(),
+                    language=transcript.get("language"),
+                    rel=transcript.get("rel"),
+                )
+            )
+    return tuple(transcripts)
+
+
+def _episode_audio_url(
+    entry: ElementTree.Element,
+    *,
+    feed_url: str,
+) -> str | None:
+    if entry.tag == f"{{{_ATOM_NAMESPACE}}}entry":
+        candidates = entry.findall(f"{{{_ATOM_NAMESPACE}}}link")
+        for link in candidates:
+            media_type = (link.get("type") or "").lower()
+            href = link.get("href")
+            if (
+                link.get("rel") == "enclosure"
+                and media_type.startswith("audio/")
+                and href
+            ):
+                return urljoin(feed_url, href)
+        return None
+
+    for enclosure in entry.findall("enclosure"):
+        media_type = (enclosure.get("type") or "").lower()
+        url = enclosure.get("url")
+        if media_type.startswith("audio/") and url:
+            return urljoin(feed_url, url)
     return None
 
 
