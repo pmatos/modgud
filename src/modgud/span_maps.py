@@ -69,7 +69,8 @@ def _parse_selections(content: str) -> tuple[tuple[str, str], ...]:
     return tuple(selections)
 
 
-def _chapters(chapters_json: object, *, item_id: int) -> tuple[Chapter, ...]:
+def parse_chapters(chapters_json: object, *, item_id: int) -> tuple[Chapter, ...]:
+    """Parse an item's stored chapters JSON into structured chapter markers."""
     if chapters_json is None:
         return ()
     parsed = json.loads(str(chapters_json))
@@ -185,7 +186,7 @@ def generate_span_map(
     transcript = blob_store.get(str(extracted_text_hash))
     chunks = chunk_transcript(
         transcript,
-        chapters=_chapters(chapters_json, item_id=item_id),
+        chapters=parse_chapters(chapters_json, item_id=item_id),
     )
     if not chunks:
         raise ValueError(f"item {item_id} has no transcript cues")

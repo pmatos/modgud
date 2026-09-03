@@ -29,6 +29,16 @@ class TranscriptChunk:
     end_ms: int
 
 
+def format_timestamp(milliseconds: int) -> str:
+    """Render a millisecond offset as an H:MM:SS or MM:SS clock reading."""
+    total_seconds = milliseconds // 1_000
+    hours, remainder = divmod(total_seconds, 3_600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
 def chunk_transcript(
     content: bytes,
     *,

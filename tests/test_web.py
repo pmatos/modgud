@@ -1,9 +1,10 @@
 """Behavioral tests for the LAN web application."""
 
+import json
 import re
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from html import unescape
@@ -15,12 +16,31 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from modgud.blobs import BlobStore
 from modgud.cli import main
 from modgud.config import ConfigError, Settings, get_settings
 from modgud.database import connect
 from modgud.digests import DigestItem, render_digest
 from modgud.formats import ItemFormat
+from modgud.transcripts import chunk_transcript
 from modgud.web import create_app, serve
+from modgud.youtube import Chapter
+
+
+def _vtt_timestamp(milliseconds: int) -> str:
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    seconds, millis = divmod(remainder, 1_000)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+
+
+def _vtt_transcript(cues: Sequence[tuple[int, int, str]]) -> bytes:
+    lines = ["WEBVTT", ""]
+    for start_ms, end_ms, text in cues:
+        lines.append(f"{_vtt_timestamp(start_ms)} --> {_vtt_timestamp(end_ms)}")
+        lines.append(text)
+        lines.append("")
+    return "\n".join(lines).encode("utf-8")
 
 
 @contextmanager
@@ -765,3 +785,209 @@ def test_serve_command_starts_the_web_application(
     main()
 
     assert len(launched) == 1
+
+
+def test_item_transcript_renders_chunk_text_with_timestamps(tmp_path: Path) -> None:
+    transcript = _vtt_transcript(
+        [
+            (0, 2_500, "Opening context worth knowing."),
+            (65_000, 95_000, "The core tradeoff is introduced here."),
+        ]
+    )
+    chapters: list[Chapter] = [
+        {"start_time": 0.0, "end_time": 60.0, "title": "Opening"},
+        {"start_time": 60.0, "end_time": 95.0, "title": "Core"},
+    ]
+    blob_store = BlobStore(tmp_path / "blobs")
+    transcript_hash = blob_store.put(transcript)
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source, title, chapters
+            ) VALUES (?, ?, ?, 'youtube', 'summarized', ?, ?, ?)
+            """,
+            (
+                "https://www.youtube.com/watch?v=transcript",
+                "transcript-item",
+                transcript_hash,
+                "Practical Channel",
+                "A worthwhile conversation",
+                json.dumps(chapters),
+            ),
+        ).lastrowid
+    assert item_id is not None
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/items/{item_id}")
+
+    assert response.status_code == 200
+    assert "A worthwhile conversation" in response.text
+    assert "Practical Channel" in response.text
+    assert "Opening context worth knowing." in response.text
+    assert "The core tradeoff is introduced here." in response.text
+    assert "01:05" in response.text
+    assert 'id="t-0"' in response.text
+    assert 'id="t-65000"' in response.text
+
+
+def test_item_transcript_anchors_match_span_map_start_times(tmp_path: Path) -> None:
+    transcript = _vtt_transcript(
+        [
+            (0, 2_000, "First worthwhile part."),
+            (10_000, 12_000, "Second worthwhile part."),
+        ]
+    )
+    chapters: list[Chapter] = [
+        {"start_time": 0.0, "end_time": 9.0, "title": "First"},
+        {"start_time": 9.0, "end_time": 13.0, "title": "Second"},
+    ]
+    chunks = chunk_transcript(transcript, chapters=chapters)
+    assert len(chunks) == 2
+    blob_store = BlobStore(tmp_path / "blobs")
+    transcript_hash = blob_store.put(transcript)
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source, chapters
+            ) VALUES (
+                'https://example.com/podcasts/anchor', 'anchor-item', ?,
+                'podcast', 'summarized', 'Practical Podcast', ?
+            )
+            """,
+            (transcript_hash, json.dumps(chapters)),
+        ).lastrowid
+        assert item_id is not None
+        connection.execute("INSERT INTO span_maps (item_id) VALUES (?)", (item_id,))
+        connection.executemany(
+            """
+            INSERT INTO span_map_spans (
+                item_id, position, start_ms, end_ms, description
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (item_id, position, chunk.start_ms, chunk.end_ms, "Worth a look.")
+                for position, chunk in enumerate(chunks)
+            ],
+        )
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/items/{item_id}")
+
+    assert response.status_code == 200
+    for chunk in chunks:
+        assert f'id="t-{chunk.start_ms}"' in response.text
+
+
+def test_item_transcript_deduplicates_anchors_for_a_repeated_start_time(
+    tmp_path: Path,
+) -> None:
+    long_text = " ".join(f"Sentence {position}." for position in range(700))
+    transcript = _vtt_transcript([(0, 7_200_000, long_text)])
+    chunks = chunk_transcript(transcript)
+    assert len(chunks) > 1
+    assert all(chunk.start_ms == 0 for chunk in chunks)
+    blob_store = BlobStore(tmp_path / "blobs")
+    transcript_hash = blob_store.put(transcript)
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source
+            ) VALUES (
+                'https://example.com/podcasts/single-cue', 'single-cue-item', ?,
+                'podcast', 'summarized', 'Practical Podcast'
+            )
+            """,
+            (transcript_hash,),
+        ).lastrowid
+    assert item_id is not None
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/items/{item_id}")
+
+    assert response.status_code == 200
+    assert response.text.count('id="t-0"') == 1
+    assert len(re.findall(r"<li[ >]", response.text)) == len(chunks)
+
+
+def test_item_transcript_bounds_a_two_hour_transcript_to_structural_chunks(
+    tmp_path: Path,
+) -> None:
+    cues = [
+        (position * 5_000, position * 5_000 + 4_000, f"Segment {position} content.")
+        for position in range(1_440)
+    ]
+    transcript = _vtt_transcript(cues)
+    expected_chunks = chunk_transcript(transcript)
+    assert 1 < len(expected_chunks) < 100
+    blob_store = BlobStore(tmp_path / "blobs")
+    transcript_hash = blob_store.put(transcript)
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source
+            ) VALUES (
+                'https://example.com/podcasts/long', 'long-item', ?,
+                'podcast', 'summarized', 'Practical Podcast'
+            )
+            """,
+            (transcript_hash,),
+        ).lastrowid
+    assert item_id is not None
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/items/{item_id}")
+
+    assert response.status_code == 200
+    assert len(re.findall(r"<li[ >]", response.text)) == len(expected_chunks)
+
+
+def test_item_transcript_404_for_a_missing_item(tmp_path: Path) -> None:
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get("/items/404")
+
+    assert response.status_code == 404
+    assert "Item not found" in response.text
+
+
+def test_item_transcript_404_when_format_has_no_transcript(tmp_path: Path) -> None:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (canonical_url, content_hash, format, state, source)
+            VALUES ('https://example.com/article', 'article', 'web',
+                    'summarized', 'example.com')
+            """
+        ).lastrowid
+    assert item_id is not None
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/items/{item_id}")
+
+    assert response.status_code == 404
+    assert "No transcript is available" in response.text
+
+
+def test_item_transcript_404_when_not_yet_transcribed(tmp_path: Path) -> None:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (canonical_url, content_hash, format, state, source)
+            VALUES ('https://www.youtube.com/watch?v=pending', 'pending', 'youtube',
+                    'extracted', 'Practical Channel')
+            """
+        ).lastrowid
+    assert item_id is not None
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/items/{item_id}")
+
+    assert response.status_code == 404
+    assert "No transcript is available" in response.text

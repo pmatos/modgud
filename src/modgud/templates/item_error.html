@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+
+{% block title %}Transcript unavailable · modgud{% endblock %}
+
+{% block content %}
+  <section class="label-page" aria-labelledby="item-error-title">
+    <h1 id="item-error-title">{{ message }}.</h1>
+    <p class="label-actions"><a href="/">Back to captured items</a></p>
+  </section>
+{% endblock %}
