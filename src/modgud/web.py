@@ -25,7 +25,7 @@ from modgud.label_tokens import (
     validate_label_token,
 )
 from modgud.span_maps import load_transcript_chunks
-from modgud.transcripts import format_timestamp, transcript_anchor
+from modgud.transcripts import chunk_anchors, format_timestamp
 
 _PACKAGE_DIRECTORY = Path(__file__).parent
 _TEMPLATES = Jinja2Templates(directory=_PACKAGE_DIRECTORY / "templates")
@@ -297,20 +297,15 @@ def create_app(
             )
         except (OSError, ValueError, TypeError):
             return item_error(request, "No transcript is available for this item")
-        entries: list[TranscriptChunkEntry] = []
-        previous_start_ms: int | None = None
-        for chunk in chunks:
-            is_first_at_start = chunk.start_ms != previous_start_ms
-            previous_start_ms = chunk.start_ms
-            entries.append(
-                TranscriptChunkEntry(
-                    anchor=transcript_anchor(chunk.start_ms)
-                    if is_first_at_start
-                    else None,
-                    timestamp=format_timestamp(chunk.start_ms),
-                    text=chunk.text,
-                )
+        anchors = chunk_anchors(chunks)
+        entries = [
+            TranscriptChunkEntry(
+                anchor=anchors.get(chunk.id),
+                timestamp=format_timestamp(chunk.start_ms),
+                text=chunk.text,
             )
+            for chunk in chunks
+        ]
         return _TEMPLATES.TemplateResponse(
             request=request,
             name="transcript.html",

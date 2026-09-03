@@ -1,6 +1,6 @@
 """Behavioral tests for timestamped transcript chunking."""
 
-from modgud.transcripts import chunk_transcript
+from modgud.transcripts import chunk_anchors, chunk_transcript
 from modgud.youtube import Chapter
 
 
@@ -123,3 +123,38 @@ cue-1
 
     assert chunks[0].text == "First & second"
     assert (chunks[0].start_ms, chunks[0].end_ms) == (1_001, 3_507)
+
+
+def test_chunk_anchors_map_every_chunk_when_start_times_are_distinct() -> None:
+    transcript = b"""WEBVTT
+
+00:00:01.001 --> 00:00:03.507
+The first useful claim.
+
+00:01:02.250 --> 00:01:05.009
+The supporting evidence.
+"""
+    chunks = chunk_transcript(transcript, max_chars=30)
+
+    assert len(chunks) == 2
+    assert chunks[0].start_ms != chunks[1].start_ms
+
+    anchors = chunk_anchors(chunks)
+
+    assert anchors == {chunk.id: f"t-{chunk.start_ms}" for chunk in chunks}
+
+
+def test_chunk_anchors_dedupe_when_a_long_cue_splits_into_several_chunks() -> None:
+    transcript = b"""WEBVTT
+
+00:00:01.123 --> 00:00:05.987
+First complete thought. Second thought.
+"""
+    chunks = chunk_transcript(transcript, max_chars=24)
+
+    assert len(chunks) == 2
+    assert chunks[0].start_ms == chunks[1].start_ms == 1_123
+
+    anchors = chunk_anchors(chunks)
+
+    assert anchors == {chunks[0].id: "t-1123"}

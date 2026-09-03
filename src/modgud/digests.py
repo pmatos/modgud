@@ -58,8 +58,13 @@ def _item_metadata(item: DigestItem) -> str:
     return " · ".join(parts)
 
 
+def _item_url(item_id: int, *segments: str, base_url: str) -> str:
+    path = "/".join(("items", str(item_id), *segments))
+    return f"{base_url.rstrip('/')}/{path}"
+
+
 def _transcript_link(item: DigestItem, *, base_url: str) -> str:
-    return f"{base_url.rstrip('/')}/items/{item.id}"
+    return _item_url(item.id, base_url=base_url)
 
 
 def _span_link(transcript_link: str | None, start_ms: int) -> str | None:
@@ -82,10 +87,8 @@ def _label_link(
         signing_secret=signing_secret,
         expires_at=expires_at,
     )
-    return (
-        f"{base_url.rstrip('/')}/items/{item_id}/labels/{label}?"
-        f"{urlencode({'token': token})}"
-    )
+    url = _item_url(item_id, "labels", label, base_url=base_url)
+    return f"{url}?{urlencode({'token': token})}"
 
 
 def render_digest(
@@ -156,21 +159,17 @@ def render_digest(
             text_parts.append(text_line)
             html_parts.append(f"{html_line}</li>")
             continue
-        text_parts.extend(
-            [
-                f"{position}. {title}",
-                f"   {metadata}",
-                f"   {item.canonical_url}",
-                f"   👍 Worth it: {worth_it_link}",
-                f"   👎 Not worth it: {not_worth_it_link}",
-                *(
-                    [f"   Full transcript: {transcript_link}"]
-                    if transcript_link is not None
-                    else []
-                ),
-                "",
-            ]
-        )
+        item_lines = [
+            f"{position}. {title}",
+            f"   {metadata}",
+            f"   {item.canonical_url}",
+            f"   👍 Worth it: {worth_it_link}",
+            f"   👎 Not worth it: {not_worth_it_link}",
+        ]
+        if transcript_link is not None:
+            item_lines.append(f"   Full transcript: {transcript_link}")
+        item_lines.append("")
+        text_parts.extend(item_lines)
         html_links = (
             f'<p><a href="{escape(worth_it_link, quote=True)}">'
             "👍 Worth it</a> · "
@@ -298,21 +297,24 @@ def select_digest_items(connection: sqlite3.Connection) -> tuple[DigestItem, ...
                  items.id
         """
     ).fetchall()
-    return tuple(
-        DigestItem(
-            id=int(row[0]),
-            canonical_url=str(row[1]),
-            format=ItemFormat(row[2]),
-            state=str(row[3]),
-            source=str(row[4]),
-            title=str(row[5]) if row[5] is not None else None,
-            author=str(row[6]) if row[6] is not None else None,
-            time_to_value_seconds=int(row[7]) if row[7] is not None else None,
-            summary=_stored_summary(row[8], row[9]),
-            span_map=get_span_map(connection, int(row[0])),
-            has_transcript=(
-                ItemFormat(row[2]) in TRANSCRIPT_FORMATS and row[10] is not None
-            ),
+    items = []
+    for row in rows:
+        item_format = ItemFormat(row[2])
+        items.append(
+            DigestItem(
+                id=int(row[0]),
+                canonical_url=str(row[1]),
+                format=item_format,
+                state=str(row[3]),
+                source=str(row[4]),
+                title=str(row[5]) if row[5] is not None else None,
+                author=str(row[6]) if row[6] is not None else None,
+                time_to_value_seconds=int(row[7]) if row[7] is not None else None,
+                summary=_stored_summary(row[8], row[9]),
+                span_map=get_span_map(connection, int(row[0])),
+                has_transcript=(
+                    item_format in TRANSCRIPT_FORMATS and row[10] is not None
+                ),
+            )
         )
-        for row in rows
-    )
+    return tuple(items)

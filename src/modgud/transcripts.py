@@ -44,6 +44,22 @@ def transcript_anchor(start_ms: int) -> str:
     return f"t-{start_ms}"
 
 
+def chunk_anchors(chunks: Iterable[TranscriptChunk]) -> dict[str, str]:
+    """Map each chunk id to its transcript-page anchor.
+
+    Splitting one long cue can produce several adjacent chunks that share a
+    start_ms (see ``_split_text``); only the first such chunk gets an anchor,
+    keeping every rendered ``id="t-..."`` unique.
+    """
+    anchors: dict[str, str] = {}
+    previous_start_ms: int | None = None
+    for chunk in chunks:
+        if chunk.start_ms != previous_start_ms:
+            anchors[chunk.id] = transcript_anchor(chunk.start_ms)
+        previous_start_ms = chunk.start_ms
+    return anchors
+
+
 def chunk_transcript(
     content: bytes,
     *,
