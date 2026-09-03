@@ -157,6 +157,8 @@ def _web_bind(value: Any, *, field: str, path: Path) -> "WebBind":
         or parsed.fragment
     ):
         raise ConfigError(f"Invalid config {path}: {field} must be a host and port")
+    if parsed.hostname in {"0.0.0.0", "::"}:
+        raise ConfigError(f"Invalid config {path}: {field} cannot use a wildcard host")
     return WebBind(host=parsed.hostname, port=port)
 
 

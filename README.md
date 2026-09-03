@@ -72,6 +72,39 @@ processed timestamp. Usable URLs run through the same item pipeline as
 `modgud add`, while their capture events record the origin and Postmark message
 ID for provenance.
 
+## LAN web application
+
+The web application is rendered on the server from Jinja templates and uses
+plain committed CSS, so it has no JavaScript toolchain or asset build step. It
+opens the same `modgud.sqlite3` under the same data directory as every CLI
+command. Start it in the foreground with:
+
+```console
+uv run modgud serve
+```
+
+The listener uses `[web].bind` from the operator config. The committed example
+uses the safe loopback-only address `127.0.0.1:8000`; replace that host with the
+workstation's private LAN address, such as `192.168.1.20:8000`, to reach it from
+other devices on the local network. Wildcard addresses such as `0.0.0.0` and
+`[::]` are rejected. As with other commands, `--config` and `--data-dir` may be
+supplied before `serve` to select non-default locations.
+
+Install the persistent user service alongside the batch timer with:
+
+```console
+uv tool install .
+mkdir -p ~/.config/systemd/user
+cp systemd/modgud-web.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now modgud-web.service
+systemctl --user status modgud-web.service
+```
+
+The service reads the same operator config and optional
+`~/.config/modgud/environment` file as the scheduled services. Restart it after
+changing the configured bind address.
+
 ## Local transcription
 
 The default transcription route is a local whisper.cpp server at

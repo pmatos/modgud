@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="welcome" aria-labelledby="welcome-title">
+    <div class="welcome-copy">
+      <h1 id="welcome-title">Make room for what matters.</h1>
+      <p>
+        Your deliberately saved things live here, ready to become concise
+        summaries and maps to the moments worth your time.
+      </p>
+    </div>
+    <p
+      class="library-status"
+      aria-label="{{ item_count }} item{% if item_count != 1 %}s{% endif %} captured"
+    >
+      <strong>{{ item_count }}</strong>
+      <span>item{% if item_count != 1 %}s{% endif %} captured</span>
+    </p>
+  </section>
+{% endblock %}

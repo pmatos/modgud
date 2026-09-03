@@ -5,8 +5,11 @@ description = "A personal content triage system"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "fastapi>=0.116,<1",
+    "jinja2>=3.1,<4",
     "openai>=2,<3",
     "trafilatura>=2.2.0,<3",
+    "uvicorn>=0.35,<1",
     "yt-dlp>=2026.8.19",
 ]
 
@@ -19,6 +22,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "httpx2>=2,<3",
     "mypy",
     "pytest",
     "ruff",
