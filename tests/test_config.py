@@ -2,6 +2,7 @@
 
 from datetime import time, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -325,3 +326,15 @@ def test_committed_example_is_a_valid_complete_config() -> None:
         "tier_1_summary",
         "transcription",
     }
+
+
+def test_committed_transcription_route_is_local_whisper_cpp() -> None:
+    config_path = Path(__file__).parents[1] / "config.example.toml"
+
+    settings = get_settings(config_path)
+    route = settings.models["transcription"]
+
+    assert urlsplit(route.base_url).hostname == "127.0.0.1"
+    assert route.model == "whisper-1"
+    assert route.api_key_env is None
+    assert settings.whisper_cpp.model_size == "large-v3-turbo"

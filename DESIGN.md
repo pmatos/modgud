@@ -110,6 +110,29 @@ guarantee is not provider choice; it is that raw transcripts are persisted, so
 re-summarizing under any future model never requires re-fetching or
 re-transcribing.
 
+### Routing decision
+
+The ten-item local-versus-hosted comparison originally planned for issue #24
+was explicitly waived on 2026-09-03. Local whisper.cpp had already proved
+reliable in day-to-day use, and no hosted provider will be provisioned for this
+comparison. Therefore there are intentionally no benchmark scores or rubric to
+record; manufacturing either without the run would be false evidence.
+
+The committed routing table is `config.example.toml`:
+
+| Task | Endpoint | Protocol model | Implementation |
+|---|---|---|---|
+| `transcription` | `http://127.0.0.1:8080/v1` | `whisper-1` | local whisper.cpp, `large-v3-turbo` weights |
+| `tier_1_summary` | `http://127.0.0.1:11434/v1` | `gemma4:26b-a4b` | local ollama |
+| `span_map` | `http://127.0.0.1:11434/v1` | `gemma4:26b-a4b` | local ollama |
+| `cleanup` | `http://127.0.0.1:11434/v1` | `gemma4:26b-a4b` | local ollama |
+
+Issue #24 confirms the transcription row; the other rows remain the existing
+local defaults and were not part of a hosted benchmark. The shipped local rows
+have no `api_key_env`. Generic hosted routing remains supported as a config
+edit, but such an edit would supersede this recorded selection rather than act
+as a fallback.
+
 ### Long inputs
 
 A transcript can exceed the context window of whatever model a task is routed
@@ -255,9 +278,9 @@ through a batch.
    digest actually get read?* If it does not, extraction pipelines, span maps
    and label logs are all effort spent on a system that will not be opened.
 2. **YouTube.** Top format by volume, and where summaries save the most time.
-   Build whisper.cpp, implement span maps. Compare local against a hosted
-   endpoint on ten real long items — judged on timestamp accuracy and claim
-   faithfulness — and set the routing table from the result.
+   Build whisper.cpp and implement span maps. The proposed ten-item hosted
+   comparison was later waived after local whisper.cpp proved reliable; the
+   routing table records local transcription as the selected route.
 3. **Web UI** for tier 2 and history. Third, because until the digest works it
    has nothing worth displaying.
 4. **Labels**, and the origin report only if the data justifies it.

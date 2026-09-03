@@ -107,7 +107,7 @@ changing the configured bind address.
 
 ## Local transcription
 
-The default transcription route is a local whisper.cpp server at
+The selected transcription route is a local whisper.cpp server at
 `http://127.0.0.1:8080/v1/audio/transcriptions`. On this Arch Linux machine,
 install the compiler, Vulkan, and audio-conversion prerequisites with:
 
@@ -203,7 +203,10 @@ systemctl --user status modgud-whisper.service
 
 The service is sandboxed, restarts after failures, reads the same default
 config file, and exposes only the address selected by the transcription route.
-Stop and disable it before changing that route to a hosted provider.
+Issue #24 records local whisper.cpp as the routing decision after the proposed
+hosted comparison was explicitly waived based on reliable day-to-day use. The
+generic routing config can still select a hosted provider later; stop and
+disable this service before making such a change.
 
 ## Scheduled audio/video processing
 
