@@ -210,6 +210,8 @@ def test_batch_command_reports_when_no_audio_fallbacks_are_pending(
 
     assert capsys.readouterr().out == (
         "Audio fallback batch: 0 attempted, 0 transcribed, 0 failed\n"
+        "Podcast transcript batch: 0 attempted, 0 feed-supplied, "
+        "0 transcribed, 0 failed\n"
     )
 
 
