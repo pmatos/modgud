@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}Confirm label · modgud{% endblock %}
+
+{% block content %}
+  <section class="label-page" aria-labelledby="confirmation-title">
+    <h1 id="confirmation-title">Was this worth your time?</h1>
+    <p class="label-subject"><a href="{{ item[1] }}">{{ item[0] }}</a></p>
+    <p class="label-explanation">
+      You’re about to record this item as <strong>{{ label_name | lower }}</strong>.
+      Nothing has been saved yet.
+    </p>
+    <div class="label-actions">
+      <form method="post">
+        <button type="submit">Record as {{ label_name | lower }}</button>
+      </form>
+      <a href="/">Leave unlabelled</a>
+    </div>
+    <p class="label-history-note">
+      If your opinion changes, you can label the item again. Each judgment stays
+      in its history.
+    </p>
+  </section>
+{% endblock %}
