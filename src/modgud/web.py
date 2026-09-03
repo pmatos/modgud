@@ -1,6 +1,7 @@
 """Server-rendered web application for modgud."""
 
 import json
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -64,6 +65,34 @@ def _format_captured_at(value: str) -> str:
     return f"{captured_at.day} {captured_at:%b %Y · %H:%M UTC}"
 
 
+def _label_error(request: Request, message: str) -> HTMLResponse:
+    return _TEMPLATES.TemplateResponse(
+        request=request,
+        name="label_error.html",
+        context={"message": message},
+        status_code=404,
+    )
+
+
+def _resolve_label(
+    request: Request, connection: sqlite3.Connection, item_id: int, label: str
+) -> tuple[str, tuple[str, str]] | HTMLResponse:
+    label_name = _LABEL_NAMES.get(label)
+    if label_name is None:
+        return _label_error(request, "Label not recognized")
+    item = connection.execute(
+        """
+        SELECT coalesce(title, canonical_url), canonical_url
+        FROM items
+        WHERE id = ?
+        """,
+        (item_id,),
+    ).fetchone()
+    if item is None:
+        return _label_error(request, "Item not found")
+    return label_name, item
+
+
 def create_app(data_dir: Path, *, settings: Settings | None = None) -> FastAPI:
     """Create an application backed by the store in ``data_dir``."""
     app = FastAPI(title="modgud")
@@ -73,14 +102,6 @@ def create_app(data_dir: Path, *, settings: Settings | None = None) -> FastAPI:
         name="static",
     )
     database = data_dir / "modgud.sqlite3"
-
-    def label_error(request: Request, message: str) -> HTMLResponse:
-        return _TEMPLATES.TemplateResponse(
-            request=request,
-            name="label_error.html",
-            context={"message": message},
-            status_code=404,
-        )
 
     @app.get("/", response_class=HTMLResponse)
     def home(
@@ -182,46 +203,27 @@ def create_app(data_dir: Path, *, settings: Settings | None = None) -> FastAPI:
 
     @app.get("/items/{item_id}/labels/{label}", response_class=HTMLResponse)
     def confirm_label(request: Request, item_id: int, label: str) -> HTMLResponse:
-        label_name = _LABEL_NAMES.get(label)
-        if label_name is None:
-            return label_error(request, "Label not recognized")
         with connect(database) as connection:
-            item = connection.execute(
-                """
-                SELECT coalesce(title, canonical_url), canonical_url
-                FROM items
-                WHERE id = ?
-                """,
-                (item_id,),
-            ).fetchone()
-        if item is None:
-            return label_error(request, "Item not found")
+            resolved = _resolve_label(request, connection, item_id, label)
+        if isinstance(resolved, HTMLResponse):
+            return resolved
+        label_name, item = resolved
         return _TEMPLATES.TemplateResponse(
             request=request,
             name="confirm_label.html",
             context={
                 "item": item,
-                "label": label,
                 "label_name": label_name,
             },
         )
 
     @app.post("/items/{item_id}/labels/{label}", response_class=HTMLResponse)
     def record_label(request: Request, item_id: int, label: str) -> HTMLResponse:
-        label_name = _LABEL_NAMES.get(label)
-        if label_name is None:
-            return label_error(request, "Label not recognized")
         with connect(database) as connection:
-            item = connection.execute(
-                """
-                SELECT coalesce(title, canonical_url), canonical_url
-                FROM items
-                WHERE id = ?
-                """,
-                (item_id,),
-            ).fetchone()
-            if item is None:
-                return label_error(request, "Item not found")
+            resolved = _resolve_label(request, connection, item_id, label)
+            if isinstance(resolved, HTMLResponse):
+                return resolved
+            label_name, item = resolved
             connection.execute(
                 "INSERT INTO events (item_id, type, payload) VALUES (?, 'label', ?)",
                 (item_id, json.dumps({"label": label}, separators=(",", ":"))),
