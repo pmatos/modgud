@@ -19,6 +19,7 @@ from modgud.delivery import PostmarkEmailClient, deliver_digest
 from modgud.extraction import ExtractionError, extract_web_page
 from modgud.formats import ItemFormat, detect_format
 from modgud.inbound import PostmarkClient, pending_inbound_captures, poll_inbound
+from modgud.origin_reports import render_origin_report
 from modgud.podcast_transcripts import run_podcast_transcript_batch
 from modgud.podcasts import (
     PodcastEpisode,
@@ -533,6 +534,12 @@ def _list(data_dir: Path) -> None:
         print(f"{item_id:<4} {item_format:<10} {source:<24} {captured_at}")
 
 
+def _origin_report(data_dir: Path) -> None:
+    with connect(data_dir / "modgud.sqlite3") as connection:
+        report = render_origin_report(connection)
+    print(report)
+
+
 def _summarize(data_dir: Path, item_id: int, settings: Settings) -> None:
     with connect(data_dir / "modgud.sqlite3") as connection:
         summary = summarize_item(
@@ -583,6 +590,10 @@ def main(*, local_now: datetime | None = None) -> None:
     add_parser = subparsers.add_parser("add", help="capture a URL")
     add_parser.add_argument("url")
     subparsers.add_parser("list", help="list captured items")
+    subparsers.add_parser(
+        "origin-report",
+        help="report label outcomes by capture origin",
+    )
     summarize_parser = subparsers.add_parser(
         "summarize",
         help="generate or replace an item's tier-1 summary",
@@ -662,6 +673,8 @@ def main(*, local_now: datetime | None = None) -> None:
         capture_url(data_dir, arguments.url, settings)
     elif arguments.command == "list":
         _list(data_dir)
+    elif arguments.command == "origin-report":
+        _origin_report(data_dir)
     elif arguments.command == "summarize":
         _summarize(data_dir, arguments.item_id, settings)
     elif arguments.command == "span-map":
