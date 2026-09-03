@@ -112,26 +112,26 @@ re-transcribing.
 
 ### Routing decision
 
-The ten-item local-versus-hosted comparison originally planned for issue #24
-was explicitly waived on 2026-09-03. Local whisper.cpp had already proved
-reliable in day-to-day use, and no hosted provider will be provisioned for this
-comparison. Therefore there are intentionally no benchmark scores or rubric to
-record; manufacturing either without the run would be false evidence.
+The planned ten-item local-versus-hosted comparison was explicitly waived on
+2026-09-03. Local whisper.cpp had already proved reliable in day-to-day use,
+and no hosted provider will be provisioned for this comparison. Therefore
+there are intentionally no benchmark scores or rubric to record; manufacturing
+either without the run would be false evidence.
 
 The committed routing table is `config.example.toml`:
 
-| Task | Endpoint | Protocol model | Implementation |
+| Task | Endpoint | Protocol Model | Implementation |
 |---|---|---|---|
 | `transcription` | `http://127.0.0.1:8080/v1` | `whisper-1` | local whisper.cpp, `large-v3-turbo` weights |
 | `tier_1_summary` | `http://127.0.0.1:11434/v1` | `gemma4:26b-a4b` | local ollama |
 | `span_map` | `http://127.0.0.1:11434/v1` | `gemma4:26b-a4b` | local ollama |
 | `cleanup` | `http://127.0.0.1:11434/v1` | `gemma4:26b-a4b` | local ollama |
 
-Issue #24 confirms the transcription row; the other rows remain the existing
-local defaults and were not part of a hosted benchmark. The shipped local rows
-have no `api_key_env`. Generic hosted routing remains supported as a config
-edit, but such an edit would supersede this recorded selection rather than act
-as a fallback.
+The waived comparison confirms the transcription row; the other rows remain
+the existing local defaults and were not part of a hosted benchmark. The
+shipped local rows have no `api_key_env`. Generic hosted routing remains
+supported as a config edit, but such an edit would supersede this recorded
+selection rather than act as a fallback.
 
 ### Long inputs
 

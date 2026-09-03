@@ -203,10 +203,10 @@ systemctl --user status modgud-whisper.service
 
 The service is sandboxed, restarts after failures, reads the same default
 config file, and exposes only the address selected by the transcription route.
-Issue #24 records local whisper.cpp as the routing decision after the proposed
-hosted comparison was explicitly waived based on reliable day-to-day use. The
-generic routing config can still select a hosted provider later; stop and
-disable this service before making such a change.
+Local whisper.cpp is the recorded routing decision, after the proposed hosted
+comparison was explicitly waived based on reliable day-to-day use. The generic
+routing config can still select a hosted provider later; stop and disable this
+service before making such a change.
 
 ## Scheduled audio/video processing
 

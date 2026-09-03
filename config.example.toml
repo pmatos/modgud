@@ -2,7 +2,7 @@
 # Keep API keys and Postmark tokens in environment variables, never in this file.
 
 [models.transcription]
-# Routing decision #24: keep transcription on the loopback whisper.cpp server.
+# Routing decision: keep transcription on the loopback whisper.cpp server.
 # Local routes deliberately omit api_key_env.
 base_url = "http://127.0.0.1:8080/v1"
 model = "whisper-1"

@@ -334,7 +334,9 @@ def test_committed_transcription_route_is_local_whisper_cpp() -> None:
     settings = get_settings(config_path)
     route = settings.models["transcription"]
 
-    assert urlsplit(route.base_url).hostname == "127.0.0.1"
+    parsed_url = urlsplit(route.base_url)
+    assert parsed_url.hostname == "127.0.0.1"
+    assert parsed_url.port == 8080
     assert route.model == "whisper-1"
     assert route.api_key_env is None
     assert settings.whisper_cpp.model_size == "large-v3-turbo"
