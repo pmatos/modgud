@@ -5,8 +5,10 @@ import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
 from html import escape
+from urllib.parse import urlsplit, urlunsplit
 
 from modgud.formats import ItemFormat
+from modgud.span_maps import SpanMap, get_span_map
 from modgud.summaries import Tier1Summary
 
 _INLINE_ITEM_LIMIT = 10
@@ -26,6 +28,7 @@ class DigestItem:
     author: str | None
     time_to_value_seconds: int | None
     summary: Tier1Summary | None
+    span_map: SpanMap | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +51,24 @@ def _item_metadata(item: DigestItem) -> str:
         minutes = (item.time_to_value_seconds + 59) // 60
         parts.append(f"{minutes} min")
     return " · ".join(parts)
+
+
+def _format_timestamp(milliseconds: int) -> str:
+    total_seconds = milliseconds // 1_000
+    hours, remainder = divmod(total_seconds, 3_600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def _span_link(item: DigestItem, start_ms: int) -> str | None:
+    if item.format is not ItemFormat.YOUTUBE:
+        return None
+    parts = urlsplit(item.canonical_url)
+    timestamp = f"t={start_ms // 1_000}s"
+    query = f"{parts.query}&{timestamp}" if parts.query else timestamp
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
 
 def render_digest(items: Sequence[DigestItem]) -> RenderedDigest:
@@ -114,9 +135,33 @@ def render_digest(items: Sequence[DigestItem]) -> RenderedDigest:
                 f"<p>{escape(item.summary.one_liner)}</p>",
                 "<h3>Claims</h3><ul>",
                 *(f"<li>{escape(claim)}</li>" for claim in item.summary.claims),
-                "</ul></article>",
             ]
         )
+        if item.span_map is not None and item.span_map.spans:
+            text_parts.append("   Span map:")
+            html_parts.extend(["</ul>", "<h3>Span map</h3><ul>"])
+            for span in item.span_map.spans:
+                timestamp = (
+                    f"{_format_timestamp(span.start_ms)}–"
+                    f"{_format_timestamp(span.end_ms)}"
+                )
+                link = _span_link(item, span.start_ms)
+                text_line = f"   - {timestamp} — {span.description}"
+                if link is not None:
+                    text_line = f"{text_line} — {link}"
+                    html_timestamp = (
+                        f'<a href="{escape(link, quote=True)}">{timestamp}</a>'
+                    )
+                else:
+                    html_timestamp = timestamp
+                text_parts.append(text_line)
+                html_parts.append(
+                    f"<li>{html_timestamp} — {escape(span.description)}</li>"
+                )
+            text_parts.append("")
+            html_parts.append("</ul></article>")
+        else:
+            html_parts.append("</ul></article>")
     if len(items) > _INLINE_ITEM_LIMIT:
         html_parts.append("</ol></section>")
     html_parts.append("</body></html>")
@@ -188,6 +233,7 @@ def select_digest_items(connection: sqlite3.Connection) -> tuple[DigestItem, ...
             author=str(row[6]) if row[6] is not None else None,
             time_to_value_seconds=int(row[7]) if row[7] is not None else None,
             summary=_stored_summary(row[8], row[9]),
+            span_map=get_span_map(connection, int(row[0])),
         )
         for row in rows
     )
