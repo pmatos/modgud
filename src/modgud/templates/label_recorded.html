@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+
+{% block title %}Label recorded · modgud{% endblock %}
+
+{% block content %}
+  <section class="label-page" aria-labelledby="recorded-title">
+    <h1 id="recorded-title">Label recorded.</h1>
+    <p class="label-subject"><a href="{{ item[1] }}">{{ item[0] }}</a></p>
+    <p class="label-explanation">
+      This item is marked <strong>{{ label_name | lower }}</strong>. Your judgment
+      was added to its history without replacing an earlier label.
+    </p>
+    <p class="label-actions"><a href="/">Back to captured items</a></p>
+  </section>
+{% endblock %}

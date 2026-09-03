@@ -230,6 +230,159 @@ def test_home_page_uses_a_served_stylesheet_without_client_javascript(
     assert "--surface:" in stylesheet.text
 
 
+def test_label_link_asks_for_confirmation_without_recording_a_label(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    with connect(database) as connection:
+        item = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, format, state, source, title
+            ) VALUES (
+                'https://example.com/useful', 'useful', 'web', 'summarized',
+                'example.com', 'A useful article'
+            )
+            """
+        )
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/items/{item.lastrowid}/labels/worth-it")
+
+    assert response.status_code == 200
+    assert "A useful article" in response.text
+    assert re.search(r"worth it", response.text, re.IGNORECASE)
+    assert re.search(r'<form[^>]+method="post"', response.text)
+    with connect(database) as connection:
+        label_count = connection.execute(
+            "SELECT count(*) FROM events WHERE type = 'label'"
+        ).fetchone()[0]
+    assert label_count == 0
+
+
+def test_confirming_a_label_records_it_in_the_event_history(tmp_path: Path) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    with connect(database) as connection:
+        item = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, format, state, source, title
+            ) VALUES (
+                'https://example.com/useful', 'useful', 'web', 'summarized',
+                'example.com', 'A useful article'
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO events (item_id, type, payload) VALUES (?, 'captured', '{}')",
+            (item.lastrowid,),
+        )
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.post(f"/items/{item.lastrowid}/labels/worth-it")
+
+    assert response.status_code == 200
+    assert "Label recorded" in response.text
+    with connect(database) as connection:
+        events = connection.execute(
+            """
+            SELECT item_id, type, json_extract(payload, '$.label'),
+                   created_at IS NOT NULL
+            FROM events
+            ORDER BY id
+            """
+        ).fetchall()
+    assert events == [
+        (item.lastrowid, "captured", None, 1),
+        (item.lastrowid, "label", "worth-it", 1),
+    ]
+
+
+def test_relabelling_appends_history_while_an_unlabelled_item_stays_distinct(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    with connect(database) as connection:
+        labelled = connection.execute(
+            """
+            INSERT INTO items (canonical_url, content_hash, format, state, source)
+            VALUES ('https://example.com/labelled', 'labelled', 'web',
+                    'summarized', 'example.com')
+            """
+        )
+        unlabelled = connection.execute(
+            """
+            INSERT INTO items (canonical_url, content_hash, format, state, source)
+            VALUES ('https://example.com/unlabelled', 'unlabelled', 'web',
+                    'summarized', 'example.com')
+            """
+        )
+
+    with TestClient(create_app(tmp_path)) as client:
+        first = client.post(f"/items/{labelled.lastrowid}/labels/worth-it")
+        second = client.post(f"/items/{labelled.lastrowid}/labels/not-worth-it")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    with connect(database) as connection:
+        labels = connection.execute(
+            """
+            SELECT item_id, json_extract(payload, '$.label')
+            FROM events
+            WHERE type = 'label'
+            ORDER BY id
+            """
+        ).fetchall()
+    assert labels == [
+        (labelled.lastrowid, "worth-it"),
+        (labelled.lastrowid, "not-worth-it"),
+    ]
+    assert all(item_id != unlabelled.lastrowid for item_id, _ in labels)
+
+
+def test_a_label_link_for_a_missing_item_fails_without_recording(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get("/items/404/labels/worth-it")
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("text/html")
+    assert "Item not found" in response.text
+    assert "No label was recorded" in response.text
+    with connect(database) as connection:
+        label_count = connection.execute(
+            "SELECT count(*) FROM events WHERE type = 'label'"
+        ).fetchone()[0]
+    assert label_count == 0
+
+
+def test_an_unknown_label_fails_without_recording(tmp_path: Path) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    with connect(database) as connection:
+        item = connection.execute(
+            """
+            INSERT INTO items (canonical_url, content_hash, format, state, source)
+            VALUES ('https://example.com/item', 'item', 'web', 'summarized',
+                    'example.com')
+            """
+        )
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.post(f"/items/{item.lastrowid}/labels/maybe")
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("text/html")
+    assert "Label not recognized" in response.text
+    assert "No label was recorded" in response.text
+    with connect(database) as connection:
+        label_count = connection.execute(
+            "SELECT count(*) FROM events WHERE type = 'label'"
+        ).fetchone()[0]
+    assert label_count == 0
+
+
 def test_server_uses_the_configured_lan_bind(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

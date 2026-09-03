@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{% block title %}Label unavailable · modgud{% endblock %}
+
+{% block content %}
+  <section class="label-page" aria-labelledby="label-error-title">
+    <h1 id="label-error-title">{{ message }}.</h1>
+    <p class="label-explanation">
+      No label was recorded. Check that you opened the complete link and that the
+      item is still in your library.
+    </p>
+    <p class="label-actions"><a href="/">Back to captured items</a></p>
+  </section>
+{% endblock %}

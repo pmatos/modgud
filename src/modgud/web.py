@@ -1,5 +1,6 @@
 """Server-rendered web application for modgud."""
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,10 @@ _ITEM_STATES = (
     "unsummarizable",
     "failed",
 )
+_LABEL_NAMES = {
+    "worth-it": "Worth it",
+    "not-worth-it": "Not worth it",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +73,14 @@ def create_app(data_dir: Path, *, settings: Settings | None = None) -> FastAPI:
         name="static",
     )
     database = data_dir / "modgud.sqlite3"
+
+    def label_error(request: Request, message: str) -> HTMLResponse:
+        return _TEMPLATES.TemplateResponse(
+            request=request,
+            name="label_error.html",
+            context={"message": message},
+            status_code=404,
+        )
 
     @app.get("/", response_class=HTMLResponse)
     def home(
@@ -166,6 +179,61 @@ def create_app(data_dir: Path, *, settings: Settings | None = None) -> FastAPI:
             }
         )
         return RedirectResponse(f"/?{query}", status_code=303)
+
+    @app.get("/items/{item_id}/labels/{label}", response_class=HTMLResponse)
+    def confirm_label(request: Request, item_id: int, label: str) -> HTMLResponse:
+        label_name = _LABEL_NAMES.get(label)
+        if label_name is None:
+            return label_error(request, "Label not recognized")
+        with connect(database) as connection:
+            item = connection.execute(
+                """
+                SELECT coalesce(title, canonical_url), canonical_url
+                FROM items
+                WHERE id = ?
+                """,
+                (item_id,),
+            ).fetchone()
+        if item is None:
+            return label_error(request, "Item not found")
+        return _TEMPLATES.TemplateResponse(
+            request=request,
+            name="confirm_label.html",
+            context={
+                "item": item,
+                "label": label,
+                "label_name": label_name,
+            },
+        )
+
+    @app.post("/items/{item_id}/labels/{label}", response_class=HTMLResponse)
+    def record_label(request: Request, item_id: int, label: str) -> HTMLResponse:
+        label_name = _LABEL_NAMES.get(label)
+        if label_name is None:
+            return label_error(request, "Label not recognized")
+        with connect(database) as connection:
+            item = connection.execute(
+                """
+                SELECT coalesce(title, canonical_url), canonical_url
+                FROM items
+                WHERE id = ?
+                """,
+                (item_id,),
+            ).fetchone()
+            if item is None:
+                return label_error(request, "Item not found")
+            connection.execute(
+                "INSERT INTO events (item_id, type, payload) VALUES (?, 'label', ?)",
+                (item_id, json.dumps({"label": label}, separators=(",", ":"))),
+            )
+        return _TEMPLATES.TemplateResponse(
+            request=request,
+            name="label_recorded.html",
+            context={
+                "item": item,
+                "label_name": label_name,
+            },
+        )
 
     return app
 
