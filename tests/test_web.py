@@ -991,3 +991,52 @@ def test_item_transcript_404_when_not_yet_transcribed(tmp_path: Path) -> None:
 
     assert response.status_code == 404
     assert "No transcript is available" in response.text
+
+
+def test_item_transcript_404_when_the_stored_blob_is_missing(tmp_path: Path) -> None:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source
+            ) VALUES (
+                'https://www.youtube.com/watch?v=missing-blob', 'missing-blob', ?,
+                'youtube', 'summarized', 'Practical Channel'
+            )
+            """,
+            ("c" * 64,),
+        ).lastrowid
+    assert item_id is not None
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/items/{item_id}")
+
+    assert response.status_code == 404
+    assert "No transcript is available" in response.text
+
+
+def test_item_transcript_404_when_chapters_are_malformed(tmp_path: Path) -> None:
+    transcript = _vtt_transcript([(0, 2_000, "Some content worth reading.")])
+    blob_store = BlobStore(tmp_path / "blobs")
+    transcript_hash = blob_store.put(transcript)
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source, chapters
+            ) VALUES (
+                'https://www.youtube.com/watch?v=bad-chapters', 'bad-chapters', ?,
+                'youtube', 'summarized', 'Practical Channel', ?
+            )
+            """,
+            (transcript_hash, json.dumps({"not": "a list"})),
+        ).lastrowid
+    assert item_id is not None
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/items/{item_id}")
+
+    assert response.status_code == 404
+    assert "No transcript is available" in response.text

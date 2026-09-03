@@ -18,19 +18,18 @@ from modgud.blobs import BlobStore
 from modgud.cli import capture_url
 from modgud.config import Settings
 from modgud.database import connect
-from modgud.formats import ItemFormat
+from modgud.formats import TRANSCRIPT_FORMATS, ItemFormat
 from modgud.label_tokens import (
     ExpiredLabelToken,
     InvalidLabelToken,
     validate_label_token,
 )
-from modgud.span_maps import parse_chapters
-from modgud.transcripts import chunk_transcript, format_timestamp
+from modgud.span_maps import load_transcript_chunks
+from modgud.transcripts import format_timestamp, transcript_anchor
 
 _PACKAGE_DIRECTORY = Path(__file__).parent
 _TEMPLATES = Jinja2Templates(directory=_PACKAGE_DIRECTORY / "templates")
 _ITEM_FORMATS = tuple(item_format.value for item_format in ItemFormat)
-_TRANSCRIPT_FORMATS = frozenset({ItemFormat.YOUTUBE.value, ItemFormat.PODCAST.value})
 _ITEM_STATES = (
     "captured",
     "extracted",
@@ -103,24 +102,28 @@ def create_app(
     database = data_dir / "modgud.sqlite3"
     blob_store = BlobStore(data_dir / "blobs")
 
-    def label_error(
-        request: Request, message: str, *, status_code: int = 404
+    def _error_response(
+        request: Request, template_name: str, message: str, *, status_code: int = 404
     ) -> HTMLResponse:
         return _TEMPLATES.TemplateResponse(
             request=request,
-            name="label_error.html",
+            name=template_name,
             context={"message": message},
             status_code=status_code,
+        )
+
+    def label_error(
+        request: Request, message: str, *, status_code: int = 404
+    ) -> HTMLResponse:
+        return _error_response(
+            request, "label_error.html", message, status_code=status_code
         )
 
     def item_error(
         request: Request, message: str, *, status_code: int = 404
     ) -> HTMLResponse:
-        return _TEMPLATES.TemplateResponse(
-            request=request,
-            name="item_error.html",
-            context={"message": message},
-            status_code=status_code,
+        return _error_response(
+            request, "item_error.html", message, status_code=status_code
         )
 
     def invalid_label_token(
@@ -283,23 +286,27 @@ def create_app(
             extracted_text_hash,
             chapters_json,
         ) = item
-        if item_format not in _TRANSCRIPT_FORMATS or extracted_text_hash is None:
+        if item_format not in TRANSCRIPT_FORMATS or extracted_text_hash is None:
             return item_error(request, "No transcript is available for this item")
-        transcript = blob_store.get(str(extracted_text_hash))
-        # Chunking must match span_maps.generate_span_map's call exactly (same
-        # default max_chars) so a span's start_ms always lands on a chunk here.
-        chunks = chunk_transcript(
-            transcript,
-            chapters=parse_chapters(chapters_json, item_id=item_id),
-        )
-        seen_start_ms: set[int] = set()
+        try:
+            chunks = load_transcript_chunks(
+                blob_store,
+                str(extracted_text_hash),
+                chapters_json,
+                item_id=item_id,
+            )
+        except (OSError, ValueError, TypeError):
+            return item_error(request, "No transcript is available for this item")
         entries: list[TranscriptChunkEntry] = []
+        previous_start_ms: int | None = None
         for chunk in chunks:
-            is_first_at_start = chunk.start_ms not in seen_start_ms
-            seen_start_ms.add(chunk.start_ms)
+            is_first_at_start = chunk.start_ms != previous_start_ms
+            previous_start_ms = chunk.start_ms
             entries.append(
                 TranscriptChunkEntry(
-                    anchor=f"t-{chunk.start_ms}" if is_first_at_start else None,
+                    anchor=transcript_anchor(chunk.start_ms)
+                    if is_first_at_start
+                    else None,
                     timestamp=format_timestamp(chunk.start_ms),
                     text=chunk.text,
                 )

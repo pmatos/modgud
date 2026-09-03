@@ -39,6 +39,11 @@ def format_timestamp(milliseconds: int) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
+def transcript_anchor(start_ms: int) -> str:
+    """Return the fragment id a transcript chunk starting at ``start_ms`` uses."""
+    return f"t-{start_ms}"
+
+
 def chunk_transcript(
     content: bytes,
     *,

@@ -9,11 +9,11 @@ from html import escape
 from urllib.parse import urlencode
 
 from modgud.config import SecretValue
-from modgud.formats import ItemFormat
+from modgud.formats import TRANSCRIPT_FORMATS, ItemFormat
 from modgud.label_tokens import create_label_token
 from modgud.span_maps import SpanMap, get_span_map
 from modgud.summaries import Tier1Summary
-from modgud.transcripts import format_timestamp
+from modgud.transcripts import format_timestamp, transcript_anchor
 
 _INLINE_ITEM_LIMIT = 10
 _CAPTURE_ONLY = "Capture only — no summary is available."
@@ -62,10 +62,10 @@ def _transcript_link(item: DigestItem, *, base_url: str) -> str:
     return f"{base_url.rstrip('/')}/items/{item.id}"
 
 
-def _span_link(item: DigestItem, start_ms: int, *, base_url: str) -> str | None:
-    if not item.has_transcript:
+def _span_link(transcript_link: str | None, start_ms: int) -> str | None:
+    if transcript_link is None:
         return None
-    return f"{_transcript_link(item, base_url=base_url)}#t-{start_ms}"
+    return f"{transcript_link}#{transcript_anchor(start_ms)}"
 
 
 def _label_link(
@@ -220,7 +220,7 @@ def render_digest(
                 timestamp = (
                     f"{format_timestamp(span.start_ms)}–{format_timestamp(span.end_ms)}"
                 )
-                link = _span_link(item, span.start_ms, base_url=label_base_url)
+                link = _span_link(transcript_link, span.start_ms)
                 text_line = f"   - {timestamp} — {span.description}"
                 if link is not None:
                     text_line = f"{text_line} — {link}"
@@ -311,8 +311,7 @@ def select_digest_items(connection: sqlite3.Connection) -> tuple[DigestItem, ...
             summary=_stored_summary(row[8], row[9]),
             span_map=get_span_map(connection, int(row[0])),
             has_transcript=(
-                ItemFormat(row[2]) in {ItemFormat.YOUTUBE, ItemFormat.PODCAST}
-                and row[10] is not None
+                ItemFormat(row[2]) in TRANSCRIPT_FORMATS and row[10] is not None
             ),
         )
         for row in rows
