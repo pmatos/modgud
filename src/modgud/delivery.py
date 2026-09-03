@@ -4,7 +4,7 @@ import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast
 from urllib.error import HTTPError, URLError
@@ -128,6 +128,10 @@ def deliver_digest(
     *,
     from_address: str,
     to_address: str,
+    label_base_url: str,
+    label_signing_secret: SecretValue,
+    label_token_lifetime: timedelta,
+    now: datetime | None = None,
     scheduled_for: date | None = None,
 ) -> DigestDeliveryResult:
     """Send the currently eligible item set and advance its event boundary."""
@@ -152,7 +156,13 @@ def deliver_digest(
                     (scheduled_for.isoformat(),),
                 )
             return DigestDeliveryResult(sent=False, item_ids=())
-        rendered = render_digest(items)
+        rendered = render_digest(
+            items,
+            label_base_url=label_base_url,
+            label_signing_secret=label_signing_secret,
+            label_token_lifetime=label_token_lifetime,
+            now=now,
+        )
         message_id = client.send_email(
             DigestEmail(
                 from_address=from_address,

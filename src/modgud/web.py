@@ -1,8 +1,9 @@
 """Server-rendered web application for modgud."""
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -17,6 +18,11 @@ from modgud.cli import capture_url
 from modgud.config import Settings
 from modgud.database import connect
 from modgud.formats import ItemFormat
+from modgud.label_tokens import (
+    ExpiredLabelToken,
+    InvalidLabelToken,
+    validate_label_token,
+)
 
 _PACKAGE_DIRECTORY = Path(__file__).parent
 _TEMPLATES = Jinja2Templates(directory=_PACKAGE_DIRECTORY / "templates")
@@ -64,7 +70,16 @@ def _format_captured_at(value: str) -> str:
     return f"{captured_at.day} {captured_at:%b %Y · %H:%M UTC}"
 
 
-def create_app(data_dir: Path, *, settings: Settings | None = None) -> FastAPI:
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def create_app(
+    data_dir: Path,
+    *,
+    settings: Settings | None = None,
+    clock: Callable[[], datetime] = _utc_now,
+) -> FastAPI:
     """Create an application backed by the store in ``data_dir``."""
     app = FastAPI(title="modgud")
     app.mount(
@@ -74,13 +89,55 @@ def create_app(data_dir: Path, *, settings: Settings | None = None) -> FastAPI:
     )
     database = data_dir / "modgud.sqlite3"
 
-    def label_error(request: Request, message: str) -> HTMLResponse:
+    def label_error(
+        request: Request, message: str, *, status_code: int = 404
+    ) -> HTMLResponse:
         return _TEMPLATES.TemplateResponse(
             request=request,
             name="label_error.html",
             context={"message": message},
-            status_code=404,
+            status_code=status_code,
         )
+
+    def invalid_label_token(
+        request: Request,
+        item_id: int,
+        label: str,
+    ) -> HTMLResponse | None:
+        signing_secret = (
+            settings.secrets.label_token_secret if settings is not None else None
+        )
+        token = request.query_params.get("token")
+        if signing_secret is None or token is None:
+            return label_error(
+                request,
+                "This label link is invalid or incomplete",
+                status_code=400,
+            )
+        try:
+            validate_label_token(
+                token,
+                item_id,
+                label,
+                signing_secret=signing_secret,
+                now=clock(),
+            )
+        except ExpiredLabelToken:
+            return label_error(
+                request,
+                "This label link has expired",
+                status_code=410,
+            )
+        except InvalidLabelToken as error:
+            message = (
+                "This label link is not valid for this item"
+                if str(error) == "wrong item"
+                else "This label link is not valid for this opinion"
+                if str(error) == "wrong label"
+                else "This label link is invalid or incomplete"
+            )
+            return label_error(request, message, status_code=400)
+        return None
 
     @app.get("/", response_class=HTMLResponse)
     def home(
@@ -185,6 +242,9 @@ def create_app(data_dir: Path, *, settings: Settings | None = None) -> FastAPI:
         label_name = _LABEL_NAMES.get(label)
         if label_name is None:
             return label_error(request, "Label not recognized")
+        token_error = invalid_label_token(request, item_id, label)
+        if token_error is not None:
+            return token_error
         with connect(database) as connection:
             item = connection.execute(
                 """
@@ -211,6 +271,9 @@ def create_app(data_dir: Path, *, settings: Settings | None = None) -> FastAPI:
         label_name = _LABEL_NAMES.get(label)
         if label_name is None:
             return label_error(request, "Label not recognized")
+        token_error = invalid_label_token(request, item_id, label)
+        if token_error is not None:
+            return token_error
         with connect(database) as connection:
             item = connection.execute(
                 """
