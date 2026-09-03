@@ -269,14 +269,19 @@ model to a specific transcription provider.
 Send the current digest immediately for a demo or manual run:
 
 ```console
-POSTMARK_SERVER_TOKEN=... uv run modgud digest --now
+POSTMARK_SERVER_TOKEN=... LABEL_TOKEN_SECRET=... uv run modgud digest --now
 ```
 
 Eligible items are rendered into HTML and plain-text bodies and submitted to
-Postmark's outbound message stream. An empty selection submits no request. A
-successful request appends one `digest_sent` event whose payload contains the
-complete item ID set and Postmark message ID; an exhausted request failure
-leaves the selection and event boundary unchanged for the next attempt.
+Postmark's outbound message stream. Every item includes worth-it and
+not-worth-it links signed for that exact item and opinion. Opening a link shows
+a non-mutating confirmation page; only its POST-backed confirmation appends a
+label event, so email-client prefetching cannot record an opinion. Modified,
+mis-scoped, and expired links explain the problem without recording a label.
+An empty selection submits no request. A successful request appends one
+`digest_sent` event whose payload contains the complete item ID set and
+Postmark message ID; an exhausted request failure leaves the selection and
+event boundary unchanged for the next attempt.
 
 For scheduled delivery, install the committed user units and put the Postmark
 server token in the service environment:
@@ -286,7 +291,11 @@ uv tool install .
 mkdir -p ~/.config/systemd/user ~/.config/modgud
 cp systemd/modgud-digest.service systemd/modgud-digest.timer \
   ~/.config/systemd/user/
-printf 'POSTMARK_SERVER_TOKEN=replace-me\n' > ~/.config/modgud/environment
+python -c 'import secrets; print(secrets.token_urlsafe(32))'
+printf '%s\n' \
+  'POSTMARK_SERVER_TOKEN=replace-me' \
+  'LABEL_TOKEN_SECRET=replace-with-generated-value' \
+  > ~/.config/modgud/environment
 chmod 600 ~/.config/modgud/environment
 systemctl --user daemon-reload
 systemctl --user enable --now modgud-digest.timer
@@ -318,10 +327,13 @@ one settings object rather than maintaining separate configuration paths.
 
 The file controls the four OpenAI-compatible model routes, inbound-mail poll
 interval, digest send time and addresses, web bind host and port, and
-label-link token lifetime. `digest.from_address` must be a confirmed Postmark
-sender signature; `digest.to_address` is the personal inbox that receives the
-digest. A hosted model route sets `api_key_env` to an environment-variable
-name; it never contains the key itself. For example:
+label-link token lifetime. The lifetime defaults to 90 days when
+`labels.token_lifetime_days` is omitted. `digest.from_address` must be a
+confirmed Postmark sender signature; `digest.to_address` is the personal inbox
+that receives the digest. Digest label URLs use `http://<web.bind>`, so set the
+bind host to the workstation's private LAN address before opening them from
+another device. A hosted model route sets `api_key_env` to an
+environment-variable name; it never contains the key itself. For example:
 
 ```toml
 [models.tier_1_summary]
@@ -332,7 +344,9 @@ api_key_env = "HOSTED_PROVIDER_API_KEY"
 
 Export `HOSTED_PROVIDER_API_KEY` in the service environment. Postmark features
 read `POSTMARK_SERVER_TOKEN` (and `POSTMARK_ACCOUNT_TOKEN` when needed) from
-the environment as well. Secret values are held in redacting wrappers in
+the environment. Digest delivery and the web confirmation endpoint both read
+the dedicated `LABEL_TOKEN_SECRET`; keep the same generated value available to
+the digest and web services. Secret values are held in redacting wrappers in
 memory; they are not part of the TOML schema, database schema, or diagnostic
 output. If a route names an unset environment variable, startup fails and
 names the missing variable without printing a value.

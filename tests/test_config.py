@@ -89,6 +89,36 @@ def test_operator_settings_are_loaded_from_one_file(tmp_path: Path) -> None:
     )
 
 
+def test_label_token_lifetime_defaults_to_ninety_days(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    _write_config(config_path)
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "token_lifetime_days = 90\n", ""
+        ),
+        encoding="utf-8",
+    )
+
+    settings = get_settings(config_path)
+
+    assert settings.label_token_lifetime == timedelta(days=90)
+
+
+def test_ipv6_web_bind_produces_a_valid_label_link_base_url(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    _write_config(config_path)
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'bind = "127.0.0.1:8000"', 'bind = "[fd00::20]:8000"'
+        ),
+        encoding="utf-8",
+    )
+
+    settings = get_settings(config_path)
+
+    assert settings.web_bind.base_url == "http://[fd00::20]:8000"
+
+
 def test_missing_config_names_the_expected_file(tmp_path: Path) -> None:
     config_path = tmp_path / "missing.toml"
 
@@ -313,6 +343,37 @@ def test_postmark_secrets_are_captured_from_the_environment_and_redacted(
     assert settings.secrets.postmark_account_token.reveal() == "account-token-secret"
     assert "server-token-secret" not in repr(settings)
     assert "account-token-secret" not in repr(settings)
+
+
+def test_label_signing_secret_is_captured_from_the_environment_and_redacted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    _write_config(config_path)
+    secret = "a-dedicated-label-signing-secret-with-32-bytes"
+    monkeypatch.setenv("LABEL_TOKEN_SECRET", secret)
+
+    settings = get_settings(config_path)
+
+    assert settings.secrets.label_token_secret is not None
+    assert settings.secrets.label_token_secret.reveal() == secret
+    assert secret not in repr(settings)
+
+
+def test_label_signing_secret_must_have_cryptographic_strength(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    _write_config(config_path)
+    monkeypatch.setenv("LABEL_TOKEN_SECRET", "too-short")
+
+    with pytest.raises(
+        ConfigError,
+        match=r"LABEL_TOKEN_SECRET must contain at least 32 bytes",
+    ):
+        get_settings(config_path)
 
 
 def test_committed_example_is_a_valid_complete_config() -> None:

@@ -50,6 +50,9 @@ def operator_configuration(
         encoding="utf-8",
     )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    monkeypatch.setenv(
+        "LABEL_TOKEN_SECRET", "a-dedicated-test-secret-with-at-least-32-bytes"
+    )
     try:
         yield
     finally:
@@ -760,6 +763,28 @@ def test_digest_now_sends_the_current_selection_immediately(
     assert capsys.readouterr().out == "Sent digest with 1 item\n"
     assert len(sent_messages) == 1
     assert sent_messages[0].to_address == "reader@example.com"
+
+
+def test_digest_fails_loudly_when_the_label_signing_secret_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("POSTMARK_SERVER_TOKEN", "server-token-secret")
+    monkeypatch.delenv("LABEL_TOKEN_SECRET", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["modgud", "--data-dir", str(tmp_path), "digest", "--now"],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        main()
+
+    assert error.value.code == 2
+    assert (
+        "LABEL_TOKEN_SECRET is required to sign label links" in capsys.readouterr().err
+    )
 
 
 def test_scheduled_digest_does_nothing_before_the_configured_local_time(

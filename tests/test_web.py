@@ -5,16 +5,21 @@ import sys
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+from html import unescape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from modgud.cli import main
-from modgud.config import ConfigError, get_settings
+from modgud.config import ConfigError, Settings, get_settings
 from modgud.database import connect
+from modgud.digests import DigestItem, render_digest
+from modgud.formats import ItemFormat
 from modgud.web import create_app, serve
 
 
@@ -41,6 +46,66 @@ def serve_pdf() -> Iterator[str]:
         server.shutdown()
         thread.join()
         server.server_close()
+
+
+def _settings_with_label_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    token_lifetime_days: int = 90,
+) -> Settings:
+    repository = Path(__file__).parents[1]
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        (repository / "config.example.toml")
+        .read_text(encoding="utf-8")
+        .replace(
+            "token_lifetime_days = 90",
+            f"token_lifetime_days = {token_lifetime_days}",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "LABEL_TOKEN_SECRET", "a-dedicated-test-secret-with-at-least-32-bytes"
+    )
+    return get_settings(config_path)
+
+
+def _signed_label_target(
+    item_id: int,
+    label: str,
+    *,
+    settings: Settings,
+    now: datetime,
+) -> str:
+    signing_secret = settings.secrets.label_token_secret
+    assert signing_secret is not None
+    rendered = render_digest(
+        (
+            DigestItem(
+                id=item_id,
+                canonical_url=f"https://example.com/{item_id}",
+                format=ItemFormat.WEB,
+                state="failed",
+                source="example.com",
+                title=f"Item {item_id}",
+                author=None,
+                time_to_value_seconds=None,
+                summary=None,
+            ),
+        ),
+        label_base_url=settings.web_bind.base_url,
+        label_signing_secret=signing_secret,
+        label_token_lifetime=settings.label_token_lifetime,
+        now=now,
+    )
+    match = re.search(
+        rf'href="([^"]+/items/{item_id}/labels/{label}\?token=[^"]+)"',
+        rendered.html,
+    )
+    assert match is not None
+    parts = urlsplit(unescape(match.group(1)))
+    return f"{parts.path}?{parts.query}"
 
 
 def test_drop_box_captures_an_item_visible_to_the_cli(
@@ -230,8 +295,186 @@ def test_home_page_uses_a_served_stylesheet_without_client_javascript(
     assert "--surface:" in stylesheet.text
 
 
+def test_a_digest_token_cannot_be_reused_for_another_item(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    with connect(database) as connection:
+        items = [
+            connection.execute(
+                """
+                INSERT INTO items (
+                    canonical_url, content_hash, format, state, source, title
+                ) VALUES (?, ?, 'web', 'summarized', 'example.com', ?)
+                """,
+                (
+                    f"https://example.com/{position}",
+                    f"content-{position}",
+                    f"Item {position}",
+                ),
+            ).lastrowid
+            for position in (1, 2)
+        ]
+    first_item, second_item = items
+    assert first_item is not None
+    assert second_item is not None
+    settings = _settings_with_label_secret(tmp_path, monkeypatch)
+    signed_target = _signed_label_target(
+        first_item,
+        "worth-it",
+        settings=settings,
+        now=datetime.now(UTC),
+    )
+    replayed_target = signed_target.replace(
+        f"/items/{first_item}/", f"/items/{second_item}/"
+    )
+
+    with TestClient(create_app(tmp_path, settings=settings)) as client:
+        response = client.post(replayed_target)
+
+    assert response.status_code == 400
+    assert "not valid for this item" in response.text
+    assert "No label was recorded" in response.text
+    with connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM events WHERE type = 'label'"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_a_digest_token_cannot_be_reused_for_the_opposite_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    with connect(database) as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, format, state, source, title
+            ) VALUES (
+                'https://example.com/scoped', 'scoped', 'web', 'summarized',
+                'example.com', 'A scoped item'
+            )
+            """
+        ).lastrowid
+    assert item_id is not None
+    settings = _settings_with_label_secret(tmp_path, monkeypatch)
+    worth_it_target = _signed_label_target(
+        item_id,
+        "worth-it",
+        settings=settings,
+        now=datetime.now(UTC),
+    )
+    replayed_target = worth_it_target.replace(
+        "/labels/worth-it?", "/labels/not-worth-it?"
+    )
+
+    with TestClient(create_app(tmp_path, settings=settings)) as client:
+        response = client.post(replayed_target)
+
+    assert response.status_code == 400
+    assert "not valid for this opinion" in response.text
+    assert "No label was recorded" in response.text
+    with connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM events WHERE type = 'label'"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_a_modified_digest_token_cannot_record_a_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    with connect(database) as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, format, state, source, title
+            ) VALUES (
+                'https://example.com/tampered', 'tampered', 'web', 'summarized',
+                'example.com', 'A tampered item'
+            )
+            """
+        ).lastrowid
+    assert item_id is not None
+    settings = _settings_with_label_secret(tmp_path, monkeypatch)
+    signed_target = _signed_label_target(
+        item_id,
+        "worth-it",
+        settings=settings,
+        now=datetime.now(UTC),
+    )
+    replacement = "A" if signed_target[-1] != "A" else "B"
+    modified_target = f"{signed_target[:-1]}{replacement}"
+
+    with TestClient(create_app(tmp_path, settings=settings)) as client:
+        response = client.post(modified_target)
+
+    assert response.status_code == 400
+    assert "invalid or incomplete" in response.text
+    assert "No label was recorded" in response.text
+    with connect(database) as connection:
+        label_count = connection.execute(
+            "SELECT count(*) FROM events WHERE type = 'label'"
+        ).fetchone()[0]
+    assert label_count == 0
+
+
+def test_an_expired_digest_token_fails_with_an_explanation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    with connect(database) as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, format, state, source, title
+            ) VALUES (
+                'https://example.com/old', 'old', 'web', 'summarized',
+                'example.com', 'An old item'
+            )
+            """
+        ).lastrowid
+    assert item_id is not None
+    settings = _settings_with_label_secret(
+        tmp_path,
+        monkeypatch,
+        token_lifetime_days=2,
+    )
+    issued_at = datetime(2026, 1, 1, tzinfo=UTC)
+    signed_target = _signed_label_target(
+        item_id,
+        "worth-it",
+        settings=settings,
+        now=issued_at,
+    )
+
+    with TestClient(
+        create_app(
+            tmp_path,
+            settings=settings,
+            clock=lambda: issued_at + timedelta(days=3),
+        )
+    ) as client:
+        response = client.get(signed_target)
+
+    assert response.status_code == 410
+    assert "expired" in response.text.lower()
+    assert "No label was recorded" in response.text
+
+
 def test_label_link_asks_for_confirmation_without_recording_a_label(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "modgud.sqlite3"
     with connect(database) as connection:
@@ -246,8 +489,17 @@ def test_label_link_asks_for_confirmation_without_recording_a_label(
             """
         )
 
-    with TestClient(create_app(tmp_path)) as client:
-        response = client.get(f"/items/{item.lastrowid}/labels/worth-it")
+    item_id = item.lastrowid
+    assert item_id is not None
+    settings = _settings_with_label_secret(tmp_path, monkeypatch)
+    target = _signed_label_target(
+        item_id,
+        "worth-it",
+        settings=settings,
+        now=datetime.now(UTC),
+    )
+    with TestClient(create_app(tmp_path, settings=settings)) as client:
+        response = client.get(target)
 
     assert response.status_code == 200
     assert "A useful article" in response.text
@@ -260,7 +512,10 @@ def test_label_link_asks_for_confirmation_without_recording_a_label(
     assert label_count == 0
 
 
-def test_confirming_a_label_records_it_in_the_event_history(tmp_path: Path) -> None:
+def test_confirming_a_label_records_it_in_the_event_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     database = tmp_path / "modgud.sqlite3"
     with connect(database) as connection:
         item = connection.execute(
@@ -278,8 +533,17 @@ def test_confirming_a_label_records_it_in_the_event_history(tmp_path: Path) -> N
             (item.lastrowid,),
         )
 
-    with TestClient(create_app(tmp_path)) as client:
-        response = client.post(f"/items/{item.lastrowid}/labels/worth-it")
+    item_id = item.lastrowid
+    assert item_id is not None
+    settings = _settings_with_label_secret(tmp_path, monkeypatch)
+    target = _signed_label_target(
+        item_id,
+        "worth-it",
+        settings=settings,
+        now=datetime.now(UTC),
+    )
+    with TestClient(create_app(tmp_path, settings=settings)) as client:
+        response = client.post(target)
 
     assert response.status_code == 200
     assert "Label recorded" in response.text
@@ -300,6 +564,7 @@ def test_confirming_a_label_records_it_in_the_event_history(tmp_path: Path) -> N
 
 def test_relabelling_appends_history_while_an_unlabelled_item_stays_distinct(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "modgud.sqlite3"
     with connect(database) as connection:
@@ -318,9 +583,24 @@ def test_relabelling_appends_history_while_an_unlabelled_item_stays_distinct(
             """
         )
 
-    with TestClient(create_app(tmp_path)) as client:
-        first = client.post(f"/items/{labelled.lastrowid}/labels/worth-it")
-        second = client.post(f"/items/{labelled.lastrowid}/labels/not-worth-it")
+    labelled_id = labelled.lastrowid
+    assert labelled_id is not None
+    settings = _settings_with_label_secret(tmp_path, monkeypatch)
+    worth_it_target = _signed_label_target(
+        labelled_id,
+        "worth-it",
+        settings=settings,
+        now=datetime.now(UTC),
+    )
+    not_worth_it_target = _signed_label_target(
+        labelled_id,
+        "not-worth-it",
+        settings=settings,
+        now=datetime.now(UTC),
+    )
+    with TestClient(create_app(tmp_path, settings=settings)) as client:
+        first = client.post(worth_it_target)
+        second = client.post(not_worth_it_target)
 
     assert first.status_code == 200
     assert second.status_code == 200
@@ -342,10 +622,18 @@ def test_relabelling_appends_history_while_an_unlabelled_item_stays_distinct(
 
 def test_a_label_link_for_a_missing_item_fails_without_recording(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "modgud.sqlite3"
-    with TestClient(create_app(tmp_path)) as client:
-        response = client.get("/items/404/labels/worth-it")
+    settings = _settings_with_label_secret(tmp_path, monkeypatch)
+    target = _signed_label_target(
+        404,
+        "worth-it",
+        settings=settings,
+        now=datetime.now(UTC),
+    )
+    with TestClient(create_app(tmp_path, settings=settings)) as client:
+        response = client.get(target)
 
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("text/html")
@@ -447,6 +735,14 @@ def test_serve_command_starts_the_web_application(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = Path(__file__).parents[1]
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        (repository / "config.example.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "LABEL_TOKEN_SECRET", "a-dedicated-test-secret-with-at-least-32-bytes"
+    )
     launched: list[object] = []
 
     def record_launch(app: object, *, host: str, port: int) -> None:
@@ -459,7 +755,7 @@ def test_serve_command_starts_the_web_application(
         [
             "modgud",
             "--config",
-            str(repository / "config.example.toml"),
+            str(config_path),
             "--data-dir",
             str(tmp_path),
             "serve",

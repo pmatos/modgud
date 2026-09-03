@@ -1,11 +1,13 @@
 """Behavioral tests for delivering the morning digest."""
 
 import json
+import re
 import sqlite3
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
+from html import unescape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import ClassVar
@@ -15,7 +17,9 @@ import pytest
 from modgud.config import SecretValue
 from modgud.database import connect
 from modgud.delivery import (
+    DigestDeliveryResult,
     DigestEmail,
+    EmailClient,
     PostmarkDeliveryError,
     PostmarkEmailClient,
     deliver_digest,
@@ -32,6 +36,27 @@ class RecordingEmailClient:
     def send_email(self, message: DigestEmail) -> str:
         self.messages.append(message)
         return "postmark-message-1"
+
+
+def _deliver_digest(
+    database: str | Path,
+    client: EmailClient,
+    *,
+    scheduled_for: date | None = None,
+) -> DigestDeliveryResult:
+    return deliver_digest(
+        database,
+        client,
+        from_address="modgud@example.com",
+        to_address="reader@example.com",
+        label_base_url="http://192.168.50.20:8000",
+        label_signing_secret=SecretValue(
+            "a-dedicated-test-secret-with-at-least-32-bytes"
+        ),
+        label_token_lifetime=timedelta(days=90),
+        now=datetime(2026, 9, 3, 7, tzinfo=UTC),
+        scheduled_for=scheduled_for,
+    )
 
 
 class _PostmarkHandler(BaseHTTPRequestHandler):
@@ -118,12 +143,7 @@ def test_non_empty_digest_is_sent_and_records_the_exact_item_set(
         item_ids = [_add_visible_item(connection, position) for position in (1, 2)]
     client = RecordingEmailClient()
 
-    result = deliver_digest(
-        database,
-        client,
-        from_address="modgud@example.com",
-        to_address="reader@example.com",
-    )
+    result = _deliver_digest(database, client)
 
     with connect(database) as connection:
         sent_events = connection.execute(
@@ -145,18 +165,43 @@ def test_non_empty_digest_is_sent_and_records_the_exact_item_set(
     }
 
 
+def test_each_digest_item_has_signed_worth_it_and_not_worth_it_links(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    with connect(database) as connection:
+        item_id = _add_visible_item(connection, 1)
+    client = RecordingEmailClient()
+
+    deliver_digest(
+        database,
+        client,
+        from_address="modgud@example.com",
+        to_address="reader@example.com",
+        label_base_url="http://192.168.50.20:8000",
+        label_signing_secret=SecretValue("a-dedicated-test-secret-with-32-bytes"),
+        label_token_lifetime=timedelta(days=90),
+        now=datetime(2026, 9, 3, 7, tzinfo=UTC),
+    )
+
+    message = client.messages[0]
+    html_links = re.findall(r'href="([^"]+)"', unescape(message.html_body))
+    label_links = [link for link in html_links if "/labels/" in link]
+    assert len(label_links) == 2
+    for label in ("worth-it", "not-worth-it"):
+        prefix = f"http://192.168.50.20:8000/items/{item_id}/labels/{label}?token="
+        matching_links = [link for link in label_links if link.startswith(prefix)]
+        assert len(matching_links) == 1
+        assert matching_links[0] in message.text_body
+
+
 def test_empty_selection_sends_nothing_and_records_no_send_event(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "modgud.sqlite3"
     client = RecordingEmailClient()
 
-    result = deliver_digest(
-        database,
-        client,
-        from_address="modgud@example.com",
-        to_address="reader@example.com",
-    )
+    result = _deliver_digest(database, client)
 
     with connect(database) as connection:
         sent_event_count = connection.execute(
@@ -219,12 +264,7 @@ def test_exhausted_send_retries_leave_no_event_and_preserve_the_selection(
             PostmarkDeliveryError,
             match=r"failed after 4 attempts \(HTTP 500\)",
         ):
-            deliver_digest(
-                database,
-                client,
-                from_address="modgud@example.com",
-                to_address="reader@example.com",
-            )
+            _deliver_digest(database, client)
 
     with connect(database) as connection:
         sent_event_count = connection.execute(
@@ -244,22 +284,10 @@ def test_a_completed_scheduled_day_does_not_send_new_items_again(
         first_item = _add_visible_item(connection, 1)
     client = RecordingEmailClient()
 
-    first = deliver_digest(
-        database,
-        client,
-        from_address="modgud@example.com",
-        to_address="reader@example.com",
-        scheduled_for=date(2026, 9, 3),
-    )
+    first = _deliver_digest(database, client, scheduled_for=date(2026, 9, 3))
     with connect(database) as connection:
         second_item = _add_visible_item(connection, 2)
-    repeated = deliver_digest(
-        database,
-        client,
-        from_address="modgud@example.com",
-        to_address="reader@example.com",
-        scheduled_for=date(2026, 9, 3),
-    )
+    repeated = _deliver_digest(database, client, scheduled_for=date(2026, 9, 3))
 
     with connect(database) as connection:
         selected_ids = tuple(item.id for item in select_digest_items(connection))
@@ -281,22 +309,10 @@ def test_an_empty_scheduled_day_is_completed_without_sending(
     database = tmp_path / "modgud.sqlite3"
     client = RecordingEmailClient()
 
-    empty_run = deliver_digest(
-        database,
-        client,
-        from_address="modgud@example.com",
-        to_address="reader@example.com",
-        scheduled_for=date(2026, 9, 3),
-    )
+    empty_run = _deliver_digest(database, client, scheduled_for=date(2026, 9, 3))
     with connect(database) as connection:
         next_item = _add_visible_item(connection, 1)
-    repeated = deliver_digest(
-        database,
-        client,
-        from_address="modgud@example.com",
-        to_address="reader@example.com",
-        scheduled_for=date(2026, 9, 3),
-    )
+    repeated = _deliver_digest(database, client, scheduled_for=date(2026, 9, 3))
 
     with connect(database) as connection:
         scheduled_runs = connection.execute(

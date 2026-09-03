@@ -201,6 +201,7 @@ class RuntimeSecrets:
     model_api_keys: Mapping[str, SecretValue]
     postmark_server_token: SecretValue | None
     postmark_account_token: SecretValue | None
+    label_token_secret: SecretValue | None
 
     def __repr__(self) -> str:
         return "RuntimeSecrets(<redacted>)"
@@ -212,6 +213,12 @@ class WebBind:
 
     host: str
     port: int
+
+    @property
+    def base_url(self) -> str:
+        """Return the HTTP origin reached by digest label links."""
+        host = f"[{self.host}]" if ":" in self.host else self.host
+        return f"http://{host}:{self.port}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -454,12 +461,7 @@ def _load_settings(path: Path) -> Settings:
         path=path,
     )
     token_lifetime_days = _positive_integer(
-        _require(
-            labels,
-            "token_lifetime_days",
-            field="labels.token_lifetime_days",
-            path=path,
-        ),
+        labels.get("token_lifetime_days", 90),
         field="labels.token_lifetime_days",
         path=path,
     )
@@ -488,6 +490,7 @@ def _load_settings(path: Path) -> Settings:
             model_api_keys=MappingProxyType(model_api_keys),
             postmark_server_token=_secret_from_environment("POSTMARK_SERVER_TOKEN"),
             postmark_account_token=_secret_from_environment("POSTMARK_ACCOUNT_TOKEN"),
+            label_token_secret=_label_token_secret_from_environment(),
         ),
     )
 
@@ -496,4 +499,13 @@ def _secret_from_environment(variable: str) -> SecretValue | None:
     value = os.environ.get(variable)
     if value is None:
         return None
+    return SecretValue(value)
+
+
+def _label_token_secret_from_environment() -> SecretValue | None:
+    value = os.environ.get("LABEL_TOKEN_SECRET")
+    if value is None:
+        return None
+    if len(value.encode()) < 32:
+        raise ConfigError("LABEL_TOKEN_SECRET must contain at least 32 bytes")
     return SecretValue(value)

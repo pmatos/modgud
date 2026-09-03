@@ -2,13 +2,20 @@
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from modgud.config import SecretValue
 from modgud.database import connect
-from modgud.digests import DigestItem, render_digest, select_digest_items
+from modgud.digests import (
+    DigestItem,
+    RenderedDigest,
+    render_digest,
+    select_digest_items,
+)
 from modgud.formats import ItemFormat
 from modgud.span_maps import Span, SpanMap
 from modgud.summaries import Tier1Summary
@@ -18,6 +25,18 @@ from modgud.summaries import Tier1Summary
 def event_log(tmp_path: Path) -> Iterator[sqlite3.Connection]:
     with connect(tmp_path / "modgud.sqlite3") as connection:
         yield connection
+
+
+def _render_digest(items: Sequence[DigestItem]) -> RenderedDigest:
+    return render_digest(
+        items,
+        label_base_url="http://192.168.50.20:8000",
+        label_signing_secret=SecretValue(
+            "a-dedicated-test-secret-with-at-least-32-bytes"
+        ),
+        label_token_lifetime=timedelta(days=90),
+        now=datetime(2026, 9, 3, 7, tzinfo=UTC),
+    )
 
 
 def _add_item(
@@ -244,10 +263,15 @@ def test_renders_one_complete_tier_1_item_as_html_and_plain_text() -> None:
         ),
     )
 
-    rendered = render_digest((item,))
+    rendered = _render_digest((item,))
 
+    text_without_label_actions = "\n".join(
+        line
+        for line in rendered.text.splitlines()
+        if "worth it:" not in line.casefold()
+    )
     assert (
-        rendered.text
+        text_without_label_actions
         == """modgud digest
 =============
 
@@ -261,7 +285,7 @@ def test_renders_one_complete_tier_1_item_as_html_and_plain_text() -> None:
    - Short tasks provide feedback quickly.
    - Feedback reduces uncertainty.
    - Lower uncertainty improves later choices.
-"""
+""".rstrip()
     )
     assert '<a href="https://example.com/useful">A useful article</a>' in rendered.html
     assert "Example Journal · Ada Rivera · 2 min" in rendered.html
@@ -308,7 +332,7 @@ def test_renders_a_timestamped_span_map_inline_after_youtube_claims() -> None:
         ),
     )
 
-    rendered = render_digest((item,))
+    rendered = _render_digest((item,))
 
     expected_text = """   - Small trials reduce risk.
 
@@ -343,7 +367,7 @@ def test_renders_an_item_without_a_summary_as_capture_only(state: str) -> None:
         summary=None,
     )
 
-    rendered = render_digest((item,))
+    rendered = _render_digest((item,))
 
     assert "Capture only — no summary is available." in rendered.text
     assert "Capture only — no summary is available." in rendered.html
@@ -377,7 +401,7 @@ def test_fifty_items_are_all_rendered_with_only_the_first_ten_expanded() -> None
         for position in range(1, 51)
     )
 
-    rendered = render_digest(items)
+    rendered = _render_digest(items)
 
     for position in range(1, 51):
         assert f"Article {position}" in rendered.text
@@ -388,12 +412,17 @@ def test_fifty_items_are_all_rendered_with_only_the_first_ten_expanded() -> None
     assert "Claim 10 alpha." in rendered.html
     assert "Claim 11 alpha." not in rendered.text
     assert "Claim 11 alpha." not in rendered.html
-    assert (
+    assert rendered.text.count("👍 Worth it:") == 50
+    assert rendered.text.count("👎 Not worth it:") == 50
+    assert rendered.html.count(">👍 Worth it</a>") == 50
+    assert rendered.html.count(">👎 Not worth it</a>") == 50
+    compact_item = (
         "11. Article 11 — One-line summary 11. — Source 11 — https://example.com/11"
-    ) in rendered.text.splitlines()
+    )
+    assert any(line.startswith(compact_item) for line in rendered.text.splitlines())
     assert (
         '<li><a href="https://example.com/50">Article 50</a> — '
-        "One-line summary 50. — Source 50</li>"
+        "One-line summary 50. — Source 50<br>"
     ) in rendered.html
 
 
@@ -427,13 +456,13 @@ def test_compact_capture_only_item_still_says_that_no_summary_is_available() -> 
         summary=None,
     )
 
-    rendered = render_digest((*summarized_items, capture_only))
+    rendered = _render_digest((*summarized_items, capture_only))
 
     expected = (
         "11. Captured PDF — Capture only — no summary is available. — "
         "example.com — https://example.com/11"
     )
-    assert expected in rendered.text.splitlines()
+    assert any(line.startswith(expected) for line in rendered.text.splitlines())
     assert "Captured PDF</a> — Capture only — no summary is available." in (
         rendered.html
     )
@@ -455,7 +484,7 @@ def test_html_escapes_captured_and_generated_content() -> None:
         ),
     )
 
-    rendered = render_digest((item,))
+    rendered = _render_digest((item,))
 
     assert "&lt;A useful article&gt;" in rendered.html
     assert "Journal &amp; News · Ada &quot;Ace&quot; Rivera" in rendered.html
@@ -472,7 +501,7 @@ def test_successful_digest_boundary_discards_compact_overflow(
         _add_item(event_log, state="failed")
     selected = select_digest_items(event_log)
 
-    rendered = render_digest(selected)
+    rendered = _render_digest(selected)
     event_log.execute(
         "INSERT INTO events (item_id, type, payload) VALUES (?, 'digest_sent', '{}')",
         (selected[0].id,),

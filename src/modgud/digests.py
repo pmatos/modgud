@@ -4,10 +4,13 @@ import json
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from html import escape
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
+from modgud.config import SecretValue
 from modgud.formats import ItemFormat
+from modgud.label_tokens import create_label_token
 from modgud.span_maps import SpanMap, get_span_map
 from modgud.summaries import Tier1Summary
 
@@ -71,8 +74,36 @@ def _span_link(item: DigestItem, start_ms: int) -> str | None:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
 
-def render_digest(items: Sequence[DigestItem]) -> RenderedDigest:
+def _label_link(
+    item_id: int,
+    label: str,
+    *,
+    base_url: str,
+    signing_secret: SecretValue,
+    expires_at: datetime,
+) -> str:
+    token = create_label_token(
+        item_id,
+        label,
+        signing_secret=signing_secret,
+        expires_at=expires_at,
+    )
+    return (
+        f"{base_url.rstrip('/')}/items/{item_id}/labels/{label}?"
+        f"{urlencode({'token': token})}"
+    )
+
+
+def render_digest(
+    items: Sequence[DigestItem],
+    *,
+    label_base_url: str,
+    label_signing_secret: SecretValue,
+    label_token_lifetime: timedelta,
+    now: datetime | None = None,
+) -> RenderedDigest:
     """Render selected items as complete HTML and plain-text email bodies."""
+    expires_at = (now or datetime.now(UTC)) + label_token_lifetime
     text_parts = ["modgud digest", "=============", ""]
     html_parts = [
         '<!doctype html><html lang="en"><head><meta charset="utf-8">',
@@ -82,6 +113,20 @@ def render_digest(items: Sequence[DigestItem]) -> RenderedDigest:
     for position, item in enumerate(items, start=1):
         title = _item_title(item)
         metadata = _item_metadata(item)
+        worth_it_link = _label_link(
+            item.id,
+            "worth-it",
+            base_url=label_base_url,
+            signing_secret=label_signing_secret,
+            expires_at=expires_at,
+        )
+        not_worth_it_link = _label_link(
+            item.id,
+            "not-worth-it",
+            base_url=label_base_url,
+            signing_secret=label_signing_secret,
+            expires_at=expires_at,
+        )
         if position > _INLINE_ITEM_LIMIT:
             if position == _INLINE_ITEM_LIMIT + 1:
                 text_parts.extend(["More items", "----------", ""])
@@ -91,12 +136,16 @@ def render_digest(items: Sequence[DigestItem]) -> RenderedDigest:
             )
             text_parts.append(
                 f"{position}. {title} — {description} — {item.source} — "
-                f"{item.canonical_url}"
+                f"{item.canonical_url} — 👍 Worth it: {worth_it_link} — "
+                f"👎 Not worth it: {not_worth_it_link}"
             )
             html_parts.append(
                 f'<li><a href="{escape(item.canonical_url, quote=True)}">'
                 f"{escape(title)}</a> — {escape(description)} — "
-                f"{escape(item.source)}</li>"
+                f"{escape(item.source)}<br>"
+                f'<a href="{escape(worth_it_link, quote=True)}">👍 Worth it</a> · '
+                f'<a href="{escape(not_worth_it_link, quote=True)}">'
+                "👎 Not worth it</a></li>"
             )
             continue
         text_parts.extend(
@@ -104,6 +153,8 @@ def render_digest(items: Sequence[DigestItem]) -> RenderedDigest:
                 f"{position}. {title}",
                 f"   {metadata}",
                 f"   {item.canonical_url}",
+                f"   👍 Worth it: {worth_it_link}",
+                f"   👎 Not worth it: {not_worth_it_link}",
                 "",
             ]
         )
@@ -115,6 +166,12 @@ def render_digest(items: Sequence[DigestItem]) -> RenderedDigest:
                     f"{escape(title)}</a></h2>"
                 ),
                 f"<p>{escape(metadata)}</p>",
+                (
+                    f'<p><a href="{escape(worth_it_link, quote=True)}">'
+                    "👍 Worth it</a> · "
+                    f'<a href="{escape(not_worth_it_link, quote=True)}">'
+                    "👎 Not worth it</a></p>"
+                ),
             ]
         )
         if item.summary is None:

@@ -630,12 +630,15 @@ def main(*, local_now: datetime | None = None) -> None:
     except ConfigError as error:
         parser.error(str(error))
     postmark_server_token = settings.secrets.postmark_server_token
+    label_token_secret = settings.secrets.label_token_secret
     if arguments.command == "poll-inbound" and postmark_server_token is None:
         parser.error(
             "POSTMARK_SERVER_TOKEN is required to poll Postmark inbound messages"
         )
     if arguments.command == "digest" and postmark_server_token is None:
         parser.error("POSTMARK_SERVER_TOKEN is required to send the digest")
+    if arguments.command in {"digest", "serve"} and label_token_secret is None:
+        parser.error("LABEL_TOKEN_SECRET is required to sign label links")
     if arguments.command == "digest" and not arguments.now:
         if local_now is None:
             local_now = datetime.now().astimezone()
@@ -712,6 +715,8 @@ def main(*, local_now: datetime | None = None) -> None:
     else:
         if postmark_server_token is None:
             raise AssertionError("Postmark token was validated before dispatch")
+        if label_token_secret is None:
+            raise AssertionError("Label token secret was validated before dispatch")
         if arguments.now:
             scheduled_for = None
         else:
@@ -723,6 +728,10 @@ def main(*, local_now: datetime | None = None) -> None:
             PostmarkEmailClient(postmark_server_token),
             from_address=settings.digest_from_address,
             to_address=settings.digest_to_address,
+            label_base_url=settings.web_bind.base_url,
+            label_signing_secret=label_token_secret,
+            label_token_lifetime=settings.label_token_lifetime,
+            now=local_now,
             scheduled_for=scheduled_for,
         )
         if digest_result.sent:

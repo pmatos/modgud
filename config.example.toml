@@ -1,5 +1,6 @@
 # Copy this file to ~/.config/modgud/config.toml and adjust it for your system.
-# Keep API keys and Postmark tokens in environment variables, never in this file.
+# Keep API keys, Postmark tokens, and LABEL_TOKEN_SECRET in environment
+# variables, never in this file.
 
 [models.transcription]
 # Routing decision #24: keep transcription on the loopback whisper.cpp server.
@@ -41,4 +42,5 @@ to_address = "reader@example.com"
 bind = "127.0.0.1:8000"
 
 [labels]
+# Signed digest links expire after 90 days when this setting is omitted.
 token_lifetime_days = 90
