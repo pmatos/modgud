@@ -29,6 +29,7 @@ from modgud.span_maps import generate_span_map
 from modgud.summaries import summarize_item
 from modgud.time_to_value import recompute_time_to_value
 from modgud.urls import canonicalize_url
+from modgud.web import serve as serve_web_app
 from modgud.whisper_cpp import WhisperCppError, launch_server
 from modgud.youtube import ExtractedYouTube, extract_youtube
 
@@ -603,6 +604,10 @@ def main(*, local_now: datetime | None = None) -> None:
         "batch",
         help="run scheduled audio/video processing",
     )
+    subparsers.add_parser(
+        "serve",
+        help="run the LAN web application",
+    )
 
     arguments = parser.parse_args()
     try:
@@ -631,7 +636,9 @@ def main(*, local_now: datetime | None = None) -> None:
             parser.error(str(error))
     data_dir: Path = arguments.data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
-    if arguments.command == "add":
+    if arguments.command == "serve":
+        serve_web_app(settings, data_dir)
+    elif arguments.command == "add":
         _add(data_dir, arguments.url, settings)
     elif arguments.command == "list":
         _list(data_dir)

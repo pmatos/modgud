@@ -36,6 +36,8 @@ from_address = "modgud@example.com"
 to_address = "reader@example.com"
 
 [web]
+# This loopback-only default is safe. Replace it with this machine's private
+# LAN address to make the app available elsewhere on the local network.
 bind = "127.0.0.1:8000"
 
 [labels]
