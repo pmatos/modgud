@@ -79,17 +79,21 @@ def _load_groups(connection: sqlite3.Connection) -> list[_OriginGroup]:
     ]
 
 
-def _display_order(
+def _classify(
     group: _OriginGroup,
     ranks: dict[str | None, int],
-) -> tuple[int, int, str]:
+) -> tuple[tuple[int, int, str], str, str]:
+    """Return (sort key, rank column, result column) for a group's row."""
     if group.origin in ranks:
-        return (0, ranks[group.origin], group.origin or "")
-    if group.origin not in {None, _MANUAL_ORIGIN}:
-        return (1, 0, group.origin)
+        rank = ranks[group.origin]
+        result = f"{100.0 * group.not_worth_it / group.labelled:.1f}% not worth it"
+        return (0, rank, group.origin or ""), str(rank), result
     if group.origin == _MANUAL_ORIGIN:
-        return (2, 0, group.origin)
-    return (3, 0, "")
+        return (2, 0, group.origin), "-", "Manual capture (not ranked)"
+    if group.origin is None:
+        return (3, 0, ""), "-", "Origin not recorded"
+    result = f"Too little data ({group.labelled}/{_MINIMUM_LABELLED_ITEMS} labelled)"
+    return (1, 0, group.origin), "-", result
 
 
 def _format_table(rows: list[tuple[str, ...]]) -> list[str]:
@@ -138,33 +142,22 @@ def render_origin_report(connection: sqlite3.Connection) -> str:
     )
     ranks = {group.origin: rank for rank, group in enumerate(rankable, start=1)}
 
-    table_rows: list[tuple[str, ...]] = []
-    for group in sorted(groups, key=lambda group: _display_order(group, ranks)):
-        if group.origin in ranks:
-            result = f"{100.0 * group.not_worth_it / group.labelled:.1f}% not worth it"
-            rank = str(ranks[group.origin])
-        elif group.origin == _MANUAL_ORIGIN:
-            result = "Manual capture (not ranked)"
-            rank = "-"
-        elif group.origin is None:
-            result = "Origin not recorded"
-            rank = "-"
-        else:
-            result = (
-                f"Too little data ({group.labelled}/{_MINIMUM_LABELLED_ITEMS} labelled)"
-            )
-            rank = "-"
-        table_rows.append(
-            (
-                rank,
-                group.origin or "(unknown)",
-                str(group.item_count),
-                str(group.worth_it),
-                str(group.not_worth_it),
-                str(group.unlabelled),
-                result,
-            )
+    classified = sorted(
+        ((*_classify(group, ranks), group) for group in groups),
+        key=lambda entry: entry[0],
+    )
+    table_rows: list[tuple[str, ...]] = [
+        (
+            rank,
+            group.origin or "(unknown)",
+            str(group.item_count),
+            str(group.worth_it),
+            str(group.not_worth_it),
+            str(group.unlabelled),
+            result,
         )
+        for _sort_key, rank, result, group in classified
+    ]
 
     return "\n".join(
         (
