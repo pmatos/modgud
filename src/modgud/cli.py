@@ -24,6 +24,7 @@ from modgud.podcasts import (
     discover_podcast_feed,
     parse_podcast_feed,
 )
+from modgud.span_maps import generate_span_map
 from modgud.summaries import summarize_item
 from modgud.time_to_value import recompute_time_to_value
 from modgud.urls import canonicalize_url
@@ -529,6 +530,20 @@ def _summarize(data_dir: Path, item_id: int, settings: Settings) -> None:
         print(f"Summarized item {item_id}")
 
 
+def _span_map(data_dir: Path, item_id: int, settings: Settings) -> None:
+    with connect(data_dir / "modgud.sqlite3") as connection:
+        span_map = generate_span_map(
+            connection,
+            BlobStore(data_dir / "blobs"),
+            item_id,
+            settings=settings,
+        )
+    if span_map is None:
+        print(f"Failed to generate span map for item {item_id}")
+    else:
+        print(f"Generated span map for item {item_id}")
+
+
 def main(*, local_now: datetime | None = None) -> None:
     """Run the modgud command-line interface."""
     parser = argparse.ArgumentParser(
@@ -556,6 +571,11 @@ def main(*, local_now: datetime | None = None) -> None:
         help="generate or replace an item's tier-1 summary",
     )
     summarize_parser.add_argument("item_id", type=int)
+    span_map_parser = subparsers.add_parser(
+        "span-map",
+        help="generate or replace an audio/video item's span map",
+    )
+    span_map_parser.add_argument("item_id", type=int)
     poll_inbound_parser = subparsers.add_parser(
         "poll-inbound",
         help="retrieve new inbound messages from Postmark",
@@ -616,6 +636,8 @@ def main(*, local_now: datetime | None = None) -> None:
         _list(data_dir)
     elif arguments.command == "summarize":
         _summarize(data_dir, arguments.item_id, settings)
+    elif arguments.command == "span-map":
+        _span_map(data_dir, arguments.item_id, settings)
     elif arguments.command == "batch":
         result = run_audio_fallback_batch(
             data_dir / "modgud.sqlite3",

@@ -34,6 +34,13 @@ item after changing models or prompts, by id:
 uv run modgud summarize 42
 ```
 
+For an audio/video item with a stored transcript, generate or regenerate its
+timestamped map through the separately configured span-map route:
+
+```console
+uv run modgud span-map 42
+```
+
 Retrieve inbound email with the same one-shot command used by the systemd
 service:
 
