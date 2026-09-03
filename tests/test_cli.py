@@ -202,6 +202,100 @@ def test_help_describes_the_command() -> None:
     assert "usage: modgud" in result.stdout
 
 
+def test_origin_report_leads_with_recorded_origin_coverage(tmp_path: Path) -> None:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        for position, origin in enumerate(("briefing@example.com", "manual", None)):
+            item = connection.execute(
+                """
+                INSERT INTO items (
+                    canonical_url, content_hash, format, state, source
+                ) VALUES (?, ?, 'web', 'summarized', 'example.com')
+                """,
+                (f"https://example.com/{position}", f"content-{position}"),
+            )
+            payload = json.dumps({"origin": origin}) if origin is not None else "{}"
+            connection.execute(
+                "INSERT INTO events (item_id, type, payload) VALUES (?, 'captured', ?)",
+                (item.lastrowid, payload),
+            )
+
+    result = run_modgud(tmp_path, "origin-report")
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[0] == "Origin coverage: 2/3 items (66.7%)"
+
+
+def test_origin_report_groups_label_outcomes_and_withholds_thin_rankings(
+    tmp_path: Path,
+) -> None:
+    positions = iter(range(1, 11))
+
+    def add_item(origin: str | None, *labels: str) -> None:
+        position = next(positions)
+        with connect(tmp_path / "modgud.sqlite3") as connection:
+            item = connection.execute(
+                """
+                INSERT INTO items (
+                    canonical_url, content_hash, format, state, source
+                ) VALUES (?, ?, 'web', 'summarized', 'example.com')
+                """,
+                (f"https://example.com/{position}", f"content-{position}"),
+            )
+            connection.execute(
+                "INSERT INTO events (item_id, type, payload) VALUES (?, 'captured', ?)",
+                (item.lastrowid, json.dumps({"origin": origin})),
+            )
+            for label in labels:
+                connection.execute(
+                    "INSERT INTO events (item_id, type, payload) VALUES (?, 'label', ?)",
+                    (item.lastrowid, json.dumps({"label": label})),
+                )
+
+    add_item("briefing@example.com", "worth-it", "not-worth-it")
+    for _ in range(3):
+        add_item("briefing@example.com", "not-worth-it")
+    add_item("briefing@example.com", "worth-it")
+    add_item("roundup@example.com", "worth-it")
+    add_item("roundup@example.com", "not-worth-it")
+    add_item("roundup@example.com")
+    add_item("manual")
+    add_item(None)
+
+    result = run_modgud(tmp_path, "origin-report")
+
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[0] == "Origin coverage: 9/10 items (90.0%)"
+    assert lines[1] == "Manual captures: 1/10 items (10.0%)"
+    assert re.fullmatch(
+        r"1\s+briefing@example\.com\s+5\s+1\s+4\s+0\s+80\.0% not worth it",
+        next(line for line in lines if "briefing@example.com" in line),
+    )
+    assert re.fullmatch(
+        r"-\s+roundup@example\.com\s+3\s+1\s+1\s+1\s+"
+        r"Too little data \(2/5 labelled\)",
+        next(line for line in lines if "roundup@example.com" in line),
+    )
+    assert "Manual capture (not ranked)" in next(
+        line for line in lines if re.search(r"\smanual\s", line)
+    )
+    assert "Origin not recorded" in next(line for line in lines if "(unknown)" in line)
+
+
+def test_origin_report_is_exportable_before_any_items_are_captured(
+    tmp_path: Path,
+) -> None:
+    result = run_modgud(tmp_path, "origin-report")
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == (
+        "Origin coverage: 0/0 items (0.0%)\n"
+        "Manual captures: 0/0 items (0.0%)\n"
+        "\n"
+        "Rank  Origin  Items  Worth it  Not worth it  Unlabelled  Result\n"
+    )
+
+
 def test_whisper_server_uses_the_configured_route_model_and_threads(
     tmp_path: Path,
 ) -> None:

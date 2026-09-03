@@ -308,6 +308,26 @@ selection. This keeps the TOML setting authoritative and lets a failed send be
 retried on the next timer tick. `--now` bypasses the clock and daily schedule
 gate, but still sends nothing when the selection is empty.
 
+## Origin report
+
+Print the subscription-pruning report, or redirect the plain-text output to a
+file:
+
+```console
+uv run modgud origin-report > origin-report.txt
+```
+
+The report begins with recorded-origin coverage and the manual-capture share,
+so it is immediately clear whether origin tracking is earning its place. Its
+table groups each item under the origin from its first capture, applies the
+item's latest worth-it or not-worth-it label, and keeps unlabelled items in a
+separate column rather than treating them as negative feedback.
+
+Non-manual origins receive a pruning rank only after five items from that
+origin have explicit labels. Until then, the source remains visible as “Too
+little data”; manual captures and items without a recorded origin are also
+shown but never ranked.
+
 ## Configuration
 
 modgud reads one TOML file at process startup. Copy the committed example to
