@@ -4,12 +4,14 @@ import json
 import re
 import sys
 import threading
-from collections.abc import Iterator, Sequence
+import time
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from html import unescape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import ClassVar
 from urllib.parse import urlsplit
 
 import pytest
@@ -1040,3 +1042,332 @@ def test_item_transcript_404_when_chapters_are_malformed(tmp_path: Path) -> None
 
     assert response.status_code == 404
     assert "No transcript is available" in response.text
+
+
+def _settings_for_tier_2_endpoint(tmp_path: Path, endpoint: str) -> Settings:
+    example = Path(__file__).parents[1] / "config.example.toml"
+    config_path = tmp_path / f"tier-2-web-config-{urlsplit(endpoint).port}.toml"
+    config_path.write_text(
+        example.read_text(encoding="utf-8").replace(
+            """[models.tier_2_summary]
+base_url = "http://127.0.0.1:11434/v1"
+model = "gemma4:26b-a4b\"""",
+            f"""[models.tier_2_summary]
+base_url = "{endpoint}"
+model = "gemma4:26b-a4b\"""",
+        ),
+        encoding="utf-8",
+    )
+    return get_settings(config_path)
+
+
+class _BlockingCompletionHandler(BaseHTTPRequestHandler):
+    request_count: ClassVar[int] = 0
+    release: ClassVar[threading.Event]
+    content: ClassVar[str]
+
+    def do_POST(self) -> None:
+        type(self).request_count += 1
+        content_length = int(self.headers["Content-Length"])
+        request = json.loads(self.rfile.read(content_length))
+        type(self).release.wait(timeout=5)
+        body = json.dumps(
+            {
+                "id": "long-form",
+                "object": "chat.completion",
+                "created": 0,
+                "model": request["model"],
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": type(self).content,
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+@contextmanager
+def serve_blocking_completion(
+    release: threading.Event, content: str
+) -> Iterator[tuple[str, type[_BlockingCompletionHandler]]]:
+    class Handler(_BlockingCompletionHandler):
+        pass
+
+    Handler.request_count = 0
+    Handler.release = release
+    Handler.content = content
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/v1", Handler
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+def _wait_until(predicate: Callable[[], bool], *, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_long_form_summary_page_offers_to_generate_for_an_eligible_item(
+    tmp_path: Path,
+) -> None:
+    blob_store = BlobStore(tmp_path / "blobs")
+    extracted_text_hash = blob_store.put(b"An article about durable queues.")
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source, title
+            ) VALUES (
+                'https://example.com/queues', 'queues-item', ?,
+                'web', 'summarized', 'example.com', 'Durable Queues'
+            )
+            """,
+            (extracted_text_hash,),
+        ).lastrowid
+    assert item_id is not None
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/items/{item_id}/summary")
+
+    assert response.status_code == 200
+    assert "Durable Queues" in response.text
+    assert re.search(r'<form[^>]+method="post"', response.text)
+    assert "Generate long-form summary" in response.text
+
+
+def test_long_form_summary_page_explains_when_none_is_possible(
+    tmp_path: Path,
+) -> None:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (canonical_url, content_hash, format, state, source)
+            VALUES ('https://example.com/deck.pdf', 'deck-item', 'pdf',
+                    'unsummarizable', 'example.com')
+            """
+        ).lastrowid
+    assert item_id is not None
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/items/{item_id}/summary")
+
+    assert response.status_code == 200
+    assert "No long-form summary is available" in response.text
+    assert "Generate long-form summary" not in response.text
+
+
+def test_a_pending_summary_left_over_from_a_restart_surfaces_as_failed(
+    tmp_path: Path,
+) -> None:
+    blob_store = BlobStore(tmp_path / "blobs")
+    extracted_text_hash = blob_store.put(b"An article about crash recovery.")
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source
+            ) VALUES (
+                'https://example.com/crash-recovery', 'crash-recovery-item', ?,
+                'web', 'summarized', 'example.com'
+            )
+            """,
+            (extracted_text_hash,),
+        ).lastrowid
+        assert item_id is not None
+        connection.execute(
+            "INSERT INTO tier_2_summaries (item_id, status) VALUES (?, 'pending')",
+            (item_id,),
+        )
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/items/{item_id}/summary")
+
+    assert response.status_code == 200
+    assert "Generating your long-form summary" not in response.text
+    assert "could not be generated" in response.text
+    assert "Try again" in response.text
+
+
+def test_long_form_summary_page_404_for_a_missing_item(tmp_path: Path) -> None:
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get("/items/404/summary")
+
+    assert response.status_code == 404
+    assert "Item not found" in response.text
+
+
+def test_requesting_a_summary_for_a_missing_item_fails_without_recording(
+    tmp_path: Path,
+) -> None:
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.post("/items/404/summary")
+
+    assert response.status_code == 404
+    assert "Item not found" in response.text
+
+
+def test_requesting_a_summary_without_model_routing_fails_clearly(
+    tmp_path: Path,
+) -> None:
+    blob_store = BlobStore(tmp_path / "blobs")
+    extracted_text_hash = blob_store.put(b"An article about routing.")
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source
+            ) VALUES (
+                'https://example.com/routing', 'routing-item', ?,
+                'web', 'summarized', 'example.com'
+            )
+            """,
+            (extracted_text_hash,),
+        ).lastrowid
+    assert item_id is not None
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.post(f"/items/{item_id}/summary")
+
+    assert response.status_code == 500
+    assert "Model routing is not configured" in response.text
+
+
+def test_requesting_a_summary_for_an_ineligible_item_fails_without_starting_work(
+    tmp_path: Path,
+) -> None:
+    config_path = Path(__file__).parents[1] / "config.example.toml"
+    settings = get_settings(config_path)
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (canonical_url, content_hash, format, state, source)
+            VALUES ('https://example.com/deck.pdf', 'deck-item-2', 'pdf',
+                    'unsummarizable', 'example.com')
+            """
+        ).lastrowid
+    assert item_id is not None
+
+    with TestClient(create_app(tmp_path, settings=settings)) as client:
+        response = client.post(f"/items/{item_id}/summary")
+
+    assert response.status_code == 400
+    assert "No content is available to summarize" in response.text
+
+
+def test_requesting_a_summary_shows_pending_then_completed_and_is_free_twice(
+    tmp_path: Path,
+) -> None:
+    blob_store = BlobStore(tmp_path / "blobs")
+    extracted_text_hash = blob_store.put(b"An article about backpressure.")
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source, title
+            ) VALUES (
+                'https://example.com/backpressure', 'backpressure-item', ?,
+                'web', 'summarized', 'example.com', 'Backpressure'
+            )
+            """,
+            (extracted_text_hash,),
+        ).lastrowid
+    assert item_id is not None
+
+    release = threading.Event()
+    long_form_text = "A patient walk through why backpressure keeps producers honest."
+    with serve_blocking_completion(release, long_form_text) as (endpoint, handler):
+        settings = _settings_for_tier_2_endpoint(tmp_path, endpoint)
+        with TestClient(create_app(tmp_path, settings=settings)) as client:
+            first = client.post(f"/items/{item_id}/summary", follow_redirects=True)
+            second = client.post(f"/items/{item_id}/summary", follow_redirects=True)
+
+            assert first.status_code == 200
+            assert "Generating your long-form summary" in first.text
+            assert "Generating your long-form summary" in second.text
+
+            release.set()
+            completed = _wait_until(
+                lambda: (
+                    "Generating your long-form summary"
+                    not in client.get(f"/items/{item_id}/summary").text
+                )
+            )
+            assert completed
+            final = client.get(f"/items/{item_id}/summary")
+
+    assert long_form_text in final.text
+    assert handler.request_count == 1
+
+
+def test_a_failed_summary_can_be_retried_and_then_completes(tmp_path: Path) -> None:
+    blob_store = BlobStore(tmp_path / "blobs")
+    extracted_text_hash = blob_store.put(b"An article about retries.")
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source, title
+            ) VALUES (
+                'https://example.com/retries', 'retries-item', ?,
+                'web', 'summarized', 'example.com', 'Retries'
+            )
+            """,
+            (extracted_text_hash,),
+        ).lastrowid
+    assert item_id is not None
+
+    release = threading.Event()
+    release.set()
+    with serve_blocking_completion(release, "   ") as (endpoint, _):
+        settings = _settings_for_tier_2_endpoint(tmp_path, endpoint)
+        with TestClient(create_app(tmp_path, settings=settings)) as client:
+            client.post(f"/items/{item_id}/summary", follow_redirects=True)
+            failed = _wait_until(
+                lambda: (
+                    "could not be generated"
+                    in client.get(f"/items/{item_id}/summary").text
+                )
+            )
+            assert failed
+            failure_page = client.get(f"/items/{item_id}/summary")
+
+    assert "Try again" in failure_page.text
+
+    release2 = threading.Event()
+    release2.set()
+    long_form_text = "A settled account after a retry."
+    with serve_blocking_completion(release2, long_form_text) as (endpoint, _):
+        settings = _settings_for_tier_2_endpoint(tmp_path, endpoint)
+        with TestClient(create_app(tmp_path, settings=settings)) as client:
+            client.post(f"/items/{item_id}/summary", follow_redirects=True)
+            completed = _wait_until(
+                lambda: long_form_text in client.get(f"/items/{item_id}/summary").text
+            )
+            assert completed

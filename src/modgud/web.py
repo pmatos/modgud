@@ -1,6 +1,7 @@
 """Server-rendered web application for modgud."""
 
 import json
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,6 +24,12 @@ from modgud.label_tokens import (
     ExpiredLabelToken,
     InvalidLabelToken,
     validate_label_token,
+)
+from modgud.long_form_summaries import (
+    LONG_FORM_SUMMARY_FORMATS,
+    generate_long_form_summary,
+    get_long_form_summary,
+    request_long_form_summary,
 )
 from modgud.span_maps import load_transcript_chunks
 from modgud.transcripts import chunk_anchors, format_timestamp
@@ -101,6 +108,20 @@ def create_app(
     )
     database = data_dir / "modgud.sqlite3"
     blob_store = BlobStore(data_dir / "blobs")
+
+    with connect(database) as connection:
+        # A generation thread cannot survive a process restart, so anything
+        # still "pending" at startup was interrupted and must not hang forever.
+        connection.execute(
+            """
+            UPDATE tier_2_summaries
+            SET status = 'failed',
+                summary_text = NULL,
+                error = 'interrupted before completion',
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE status = 'pending'
+            """
+        )
 
     def _error_response(
         request: Request, template_name: str, message: str, *, status_code: int = 404
@@ -316,6 +337,92 @@ def create_app(
                 "chunks": entries,
             },
         )
+
+    def _run_long_form_summary(item_id: int, active_settings: Settings) -> None:
+        try:
+            with connect(database) as connection:
+                generate_long_form_summary(
+                    connection, blob_store, item_id, settings=active_settings
+                )
+        except Exception as error:  # noqa: BLE001 - must surface, never hang pending
+            error_message = str(error).strip() or type(error).__name__
+            with connect(database) as connection:
+                connection.execute(
+                    """
+                    UPDATE tier_2_summaries
+                    SET status = 'failed',
+                        summary_text = NULL,
+                        error = ?,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE item_id = ?
+                    """,
+                    (error_message, item_id),
+                )
+
+    @app.get("/items/{item_id}/summary", response_class=HTMLResponse)
+    def item_long_form_summary(request: Request, item_id: int) -> HTMLResponse:
+        with connect(database) as connection:
+            item = connection.execute(
+                """
+                SELECT coalesce(title, canonical_url), canonical_url, source,
+                       format, extracted_text_hash
+                FROM items
+                WHERE id = ?
+                """,
+                (item_id,),
+            ).fetchone()
+            if item is None:
+                return item_error(request, "Item not found")
+            title, canonical_url, source, item_format, extracted_text_hash = item
+            summary = get_long_form_summary(connection, item_id)
+        eligible = (
+            item_format in LONG_FORM_SUMMARY_FORMATS and extracted_text_hash is not None
+        )
+        return _TEMPLATES.TemplateResponse(
+            request=request,
+            name="long_form_summary.html",
+            context={
+                "title": title,
+                "canonical_url": canonical_url,
+                "source": source,
+                "eligible": eligible,
+                "summary": summary,
+            },
+        )
+
+    @app.post("/items/{item_id}/summary")
+    def request_item_long_form_summary(request: Request, item_id: int) -> Response:
+        with connect(database) as connection:
+            item = connection.execute(
+                "SELECT format, extracted_text_hash FROM items WHERE id = ?",
+                (item_id,),
+            ).fetchone()
+            if item is None:
+                return item_error(request, "Item not found")
+            item_format, extracted_text_hash = item
+            if (
+                item_format not in LONG_FORM_SUMMARY_FORMATS
+                or extracted_text_hash is None
+            ):
+                return item_error(
+                    request,
+                    "No content is available to summarize for this item",
+                    status_code=400,
+                )
+            if settings is None:
+                return item_error(
+                    request,
+                    "Model routing is not configured for this server",
+                    status_code=500,
+                )
+            started = request_long_form_summary(connection, item_id)
+        if started:
+            threading.Thread(
+                target=_run_long_form_summary,
+                args=(item_id, settings),
+                daemon=True,
+            ).start()
+        return RedirectResponse(f"/items/{item_id}/summary", status_code=303)
 
     @app.get("/items/{item_id}/labels/{label}", response_class=HTMLResponse)
     def confirm_label(request: Request, item_id: int, label: str) -> HTMLResponse:

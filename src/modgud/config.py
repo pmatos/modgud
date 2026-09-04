@@ -12,7 +12,9 @@ from types import MappingProxyType
 from typing import Any, cast
 from urllib.parse import urlsplit
 
-_MODEL_TASKS = frozenset({"transcription", "tier_1_summary", "span_map", "cleanup"})
+_MODEL_TASKS = frozenset(
+    {"transcription", "tier_1_summary", "tier_2_summary", "span_map", "cleanup"}
+)
 _ENVIRONMENT_VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _CLOCK_TIME = re.compile(r"([01][0-9]|2[0-3]):([0-5][0-9])\Z")
 _WHISPER_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")

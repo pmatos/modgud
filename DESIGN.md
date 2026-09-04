@@ -85,11 +85,11 @@ reliable path and captions are a cheap optimization attempted first. When
 captions fail, pull audio and transcribe. This converts an ongoing maintenance
 treadmill into a compute cost.
 
-## Models: one config, four tasks
+## Models: one config, five tasks
 
-Every model call — transcription, tier-1 summary, span map, and title/format
-cleanup — goes through the **OpenAI-compatible protocol**. A config table maps
-each task to `{base_url, model}`.
+Every model call — transcription, tier-1 summary, tier-2 long-form summary,
+span map, and title/format cleanup — goes through the **OpenAI-compatible
+protocol**. A config table maps each task to `{base_url, model}`.
 
 Local is the default:
 
@@ -124,6 +124,7 @@ The committed routing table is `config.example.toml`:
 |---|---|---|---|
 | `transcription` | `http://127.0.0.1:8080/v1` | `whisper-1` | local whisper.cpp, `large-v3-turbo` weights |
 | `tier_1_summary` | `http://127.0.0.1:11434/v1` | `gemma4:26b-a4b` | local ollama |
+| `tier_2_summary` | `http://127.0.0.1:11434/v1` | `gemma4:26b-a4b` | local ollama |
 | `span_map` | `http://127.0.0.1:11434/v1` | `gemma4:26b-a4b` | local ollama |
 | `cleanup` | `http://127.0.0.1:11434/v1` | `gemma4:26b-a4b` | local ollama |
 
@@ -136,7 +137,7 @@ as a fallback.
 ### Long inputs
 
 A transcript can exceed the context window of whatever model a task is routed
-to. Tier-1 summarization of long inputs reuses the same timestamped chunking
+to. Tier-1 and tier-2 summarization of long inputs reuse the same timestamped chunking
 built for span maps: summarize per chunk, then combine. There is one chunking
 mechanism in the system, not two.
 

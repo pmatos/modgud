@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} · Long-form summary · modgud{% endblock %}
+
+{% block head %}
+  {% if summary and summary.status == "pending" %}
+    <meta http-equiv="refresh" content="5">
+  {% endif %}
+{% endblock %}
+
+{% block content %}
+  <section class="transcript-page" aria-labelledby="summary-title">
+    <p class="transcript-back"><a href="/">Back to captured items</a></p>
+    <h1 id="summary-title"><a href="{{ canonical_url }}">{{ title }}</a></h1>
+    <p class="transcript-source">{{ source }}</p>
+
+    {% if not eligible %}
+      <p class="empty-library">
+        No long-form summary is available for this item.
+      </p>
+    {% elif summary is none %}
+      <form method="post" class="label-actions">
+        <button type="submit">Generate long-form summary</button>
+      </form>
+    {% elif summary.status == "pending" %}
+      <p class="label-explanation" role="status">
+        Generating your long-form summary&hellip; this page refreshes on its own.
+      </p>
+    {% elif summary.status == "failed" %}
+      <p class="capture-error" role="alert">
+        The long-form summary could not be generated: {{ summary.error }}
+      </p>
+      <form method="post" class="label-actions">
+        <button type="submit">Try again</button>
+      </form>
+    {% else %}
+      <p class="transcript-text">{{ summary.summary_text }}</p>
+    {% endif %}
+  </section>
+{% endblock %}

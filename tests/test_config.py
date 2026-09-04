@@ -20,6 +20,10 @@ model = "whisper-1"
 base_url = "http://127.0.0.1:11434/v1"
 model = "gemma4:26b-a4b"
 
+[models.tier_2_summary]
+base_url = "http://127.0.0.1:11434/v1"
+model = "gemma4:26b-a4b"
+
 [models.span_map]
 base_url = "http://127.0.0.1:11434/v1"
 model = "gemma4:26b-a4b"
@@ -385,6 +389,7 @@ def test_committed_example_is_a_valid_complete_config() -> None:
         "cleanup",
         "span_map",
         "tier_1_summary",
+        "tier_2_summary",
         "transcription",
     }
 
