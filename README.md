@@ -345,7 +345,7 @@ shared startup seam for scheduled batch commands and the web app. The function
 validates and caches the file once per process, so those entrypoints consume
 one settings object rather than maintaining separate configuration paths.
 
-The file controls the four OpenAI-compatible model routes, inbound-mail poll
+The file controls the five OpenAI-compatible model routes, inbound-mail poll
 interval, digest send time and addresses, web bind host and port, and
 label-link token lifetime. The lifetime defaults to 90 days when
 `labels.token_lifetime_days` is omitted. `digest.from_address` must be a
@@ -372,7 +372,7 @@ output. If a route names an unset environment variable, startup fails and
 names the missing variable without printing a value.
 
 Model callers use the same `modgud.models.create_model_client` factory for all
-four tasks. It returns the OpenAI-compatible client and configured model as one
+five tasks. It returns the OpenAI-compatible client and configured model as one
 routed value. The factory supplies local endpoints with a non-secret placeholder
 credential because the OpenAI client requires one; hosted routes instead use
 the secret captured from the row's `api_key_env`. No caller branches on the
@@ -403,6 +403,14 @@ stored in `tier_1_summaries` as a separate one-liner and JSON claim array;
 long transcripts are summarized through the shared timestamped chunker before
 their chunk summaries are combined. Regeneration replaces the artifact row
 while append-only events retain generation history.
+
+The tier-2 long-form summary is generated on demand rather than for every
+item: visiting an eligible item's `/items/<id>/summary` page offers to
+generate one, and the request runs against the `tier_2_summary` model route in
+a background thread while the page shows a pending state and refreshes itself.
+The result is stored in `tier_2_summaries`, keyed by item, so a second visit
+returns the stored text without calling the model again; a failed attempt can
+be retried from the same page.
 
 ## Shape
 

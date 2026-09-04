@@ -18,6 +18,7 @@ def example_config_path() -> Path:
     [
         ("transcription", "http://127.0.0.1:8080/v1/", "whisper-1"),
         ("tier_1_summary", "http://127.0.0.1:11434/v1/", "gemma4:26b-a4b"),
+        ("tier_2_summary", "http://127.0.0.1:11434/v1/", "gemma4:26b-a4b"),
         ("span_map", "http://127.0.0.1:11434/v1/", "gemma4:26b-a4b"),
         ("cleanup", "http://127.0.0.1:11434/v1/", "gemma4:26b-a4b"),
     ],

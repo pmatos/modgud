@@ -10,6 +10,7 @@ from modgud.config import Settings, get_settings
 type ModelTask = Literal[
     "transcription",
     "tier_1_summary",
+    "tier_2_summary",
     "span_map",
     "cleanup",
 ]
