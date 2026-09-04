@@ -29,6 +29,37 @@ class TranscriptChunk:
     end_ms: int
 
 
+def format_timestamp(milliseconds: int) -> str:
+    """Render a millisecond offset as an H:MM:SS or MM:SS clock reading."""
+    total_seconds = milliseconds // 1_000
+    hours, remainder = divmod(total_seconds, 3_600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def transcript_anchor(start_ms: int) -> str:
+    """Return the fragment id a transcript chunk starting at ``start_ms`` uses."""
+    return f"t-{start_ms}"
+
+
+def chunk_anchors(chunks: Iterable[TranscriptChunk]) -> dict[str, str]:
+    """Map each chunk id to its transcript-page anchor.
+
+    Splitting one long cue can produce several adjacent chunks that share a
+    start_ms (see ``_split_text``); only the first such chunk gets an anchor,
+    keeping every rendered ``id="t-..."`` unique.
+    """
+    anchors: dict[str, str] = {}
+    previous_start_ms: int | None = None
+    for chunk in chunks:
+        if chunk.start_ms != previous_start_ms:
+            anchors[chunk.id] = transcript_anchor(chunk.start_ms)
+        previous_start_ms = chunk.start_ms
+    return anchors
+
+
 def chunk_transcript(
     content: bytes,
     *,

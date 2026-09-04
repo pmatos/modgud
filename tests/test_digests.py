@@ -211,6 +211,51 @@ def test_selected_records_include_item_metadata_summary_and_span_map(
     )
 
 
+def test_has_transcript_reflects_format_and_stored_transcript(
+    event_log: sqlite3.Connection,
+) -> None:
+    with_transcript = event_log.execute(
+        """
+        INSERT INTO items (
+            canonical_url, content_hash, extracted_text_hash,
+            format, state, source
+        ) VALUES (?, ?, ?, 'youtube', 'summarized', 'example.com')
+        """,
+        ("https://www.youtube.com/watch?v=t", "youtube-transcript", "a" * 64),
+    ).lastrowid
+    without_transcript_hash = event_log.execute(
+        """
+        INSERT INTO items (canonical_url, content_hash, format, state, source)
+        VALUES (?, ?, 'youtube', 'summarized', 'example.com')
+        """,
+        ("https://www.youtube.com/watch?v=u", "youtube-no-transcript"),
+    ).lastrowid
+    web_with_hash = event_log.execute(
+        """
+        INSERT INTO items (
+            canonical_url, content_hash, extracted_text_hash,
+            format, state, source
+        ) VALUES (?, ?, ?, 'web', 'summarized', 'example.com')
+        """,
+        ("https://example.com/article", "web-article", "b" * 64),
+    ).lastrowid
+    assert with_transcript is not None
+    assert without_transcript_hash is not None
+    assert web_with_hash is not None
+    event_log.executemany(
+        "INSERT INTO events (item_id, type, payload) VALUES (?, 'captured', '{}')",
+        [(with_transcript,), (without_transcript_hash,), (web_with_hash,)],
+    )
+
+    selected = {item.id: item.has_transcript for item in select_digest_items(event_log)}
+
+    assert selected == {
+        with_transcript: True,
+        without_transcript_hash: False,
+        web_with_hash: False,
+    }
+
+
 def test_failed_send_leaves_selection_unchanged_and_selection_writes_nothing(
     event_log: sqlite3.Connection,
 ) -> None:
@@ -298,11 +343,14 @@ def test_renders_one_complete_tier_1_item_as_html_and_plain_text() -> None:
     assert "<li>Lower uncertainty improves later choices.</li>" in rendered.html
 
 
-def test_renders_a_timestamped_span_map_inline_after_youtube_claims() -> None:
+@pytest.mark.parametrize("item_format", [ItemFormat.YOUTUBE, ItemFormat.PODCAST])
+def test_renders_a_timestamped_span_map_inline_anchored_into_the_transcript(
+    item_format: ItemFormat,
+) -> None:
     item = DigestItem(
         id=1,
         canonical_url="https://www.youtube.com/watch?v=worthwhile",
-        format=ItemFormat.YOUTUBE,
+        format=item_format,
         state="summarized",
         source="Practical Channel",
         title="A worthwhile conversation",
@@ -330,6 +378,7 @@ def test_renders_a_timestamped_span_map_inline_after_youtube_claims() -> None:
                 ),
             )
         ),
+        has_transcript=True,
     )
 
     rendered = _render_digest((item,))
@@ -337,20 +386,114 @@ def test_renders_a_timestamped_span_map_inline_after_youtube_claims() -> None:
     expected_text = """   - Small trials reduce risk.
 
    Span map:
-   - 01:05–01:35 — The core tradeoff is introduced. — https://www.youtube.com/watch?v=worthwhile&t=65s
-   - 1:02:05–1:02:40 — The practical result is derived. — https://www.youtube.com/watch?v=worthwhile&t=3725s
+   - 01:05–01:35 — The core tradeoff is introduced. — http://192.168.50.20:8000/items/1#t-65000
+   - 1:02:05–1:02:40 — The practical result is derived. — http://192.168.50.20:8000/items/1#t-3725000
 """
     assert expected_text in rendered.text
     expected_html = (
         "<li>Small trials reduce risk.</li></ul>"
         "<h3>Span map</h3><ul>"
-        '<li><a href="https://www.youtube.com/watch?v=worthwhile&amp;t=65s">'
+        '<li><a href="http://192.168.50.20:8000/items/1#t-65000">'
         "01:05–01:35</a> — The core tradeoff is introduced.</li>"
-        '<li><a href="https://www.youtube.com/watch?v=worthwhile&amp;t=3725s">'
+        '<li><a href="http://192.168.50.20:8000/items/1#t-3725000">'
         "1:02:05–1:02:40</a> — The practical result is derived.</li>"
         "</ul>"
     )
     assert expected_html in rendered.html
+
+
+def test_span_map_timestamps_are_plain_text_without_a_stored_transcript() -> None:
+    item = DigestItem(
+        id=1,
+        canonical_url="https://www.youtube.com/watch?v=worthwhile",
+        format=ItemFormat.YOUTUBE,
+        state="summarized",
+        source="Practical Channel",
+        title="A worthwhile conversation",
+        author=None,
+        time_to_value_seconds=95,
+        summary=Tier1Summary(
+            one_liner="A conversation about making practical tradeoffs.",
+            claims=("Fast feedback improves decisions.",),
+        ),
+        span_map=SpanMap(
+            spans=(
+                Span(
+                    start_ms=65_000,
+                    end_ms=95_000,
+                    description="The core tradeoff is introduced.",
+                ),
+            )
+        ),
+        has_transcript=False,
+    )
+
+    rendered = _render_digest((item,))
+
+    assert "01:05–01:35 — The core tradeoff is introduced.\n" in rendered.text
+    assert "<li>01:05–01:35 — The core tradeoff is introduced.</li>" in rendered.html
+    assert "Full transcript" not in rendered.text
+    assert "Full transcript" not in rendered.html
+    assert "#t-" not in rendered.text
+    assert "#t-" not in rendered.html
+
+
+def test_full_transcript_link_appears_for_inline_items_with_a_stored_transcript() -> (
+    None
+):
+    item = DigestItem(
+        id=7,
+        canonical_url="https://example.com/podcasts/7",
+        format=ItemFormat.PODCAST,
+        state="summarized",
+        source="Practical Podcast",
+        title="An episode worth hearing",
+        author=None,
+        time_to_value_seconds=60,
+        summary=Tier1Summary(
+            one_liner="An episode about practical tradeoffs.",
+            claims=("Fast feedback improves decisions.",),
+        ),
+        has_transcript=True,
+    )
+
+    rendered = _render_digest((item,))
+
+    assert "Full transcript: http://192.168.50.20:8000/items/7" in rendered.text
+    assert (
+        '<a href="http://192.168.50.20:8000/items/7">Full transcript</a>'
+        in rendered.html
+    )
+
+
+def test_full_transcript_link_appears_for_overflow_items_with_a_stored_transcript() -> (
+    None
+):
+    items = tuple(
+        DigestItem(
+            id=position,
+            canonical_url=f"https://example.com/{position}",
+            format=ItemFormat.PODCAST if position == 11 else ItemFormat.WEB,
+            state="summarized",
+            source="example.com",
+            title=f"Item {position}",
+            author=None,
+            time_to_value_seconds=None,
+            summary=None,
+            has_transcript=position == 11,
+        )
+        for position in range(1, 12)
+    )
+
+    rendered = _render_digest(items)
+
+    assert "Full transcript: http://192.168.50.20:8000/items/11" in rendered.text
+    assert (
+        '<a href="http://192.168.50.20:8000/items/11">Full transcript</a>'
+        in rendered.html
+    )
+    assert rendered.text.count("Full transcript:") == 1
+    assert rendered.html.count("Full transcript</a>") == 1
 
 
 @pytest.mark.parametrize("state", ["failed", "unsummarizable"])

@@ -14,15 +14,18 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
+from modgud.blobs import BlobStore
 from modgud.cli import capture_url
 from modgud.config import Settings
 from modgud.database import connect
-from modgud.formats import ItemFormat
+from modgud.formats import TRANSCRIPT_FORMATS, ItemFormat
 from modgud.label_tokens import (
     ExpiredLabelToken,
     InvalidLabelToken,
     validate_label_token,
 )
+from modgud.span_maps import load_transcript_chunks
+from modgud.transcripts import chunk_anchors, format_timestamp
 
 _PACKAGE_DIRECTORY = Path(__file__).parent
 _TEMPLATES = Jinja2Templates(directory=_PACKAGE_DIRECTORY / "templates")
@@ -53,6 +56,15 @@ class ItemListEntry:
     captured_at: str
     captured_at_label: str
     time_to_value: str
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptChunkEntry:
+    """Display-ready fields for one rendered transcript chunk."""
+
+    anchor: str | None
+    timestamp: str
+    text: str
 
 
 def _format_time_to_value(seconds: int | None) -> str:
@@ -88,15 +100,30 @@ def create_app(
         name="static",
     )
     database = data_dir / "modgud.sqlite3"
+    blob_store = BlobStore(data_dir / "blobs")
+
+    def _error_response(
+        request: Request, template_name: str, message: str, *, status_code: int = 404
+    ) -> HTMLResponse:
+        return _TEMPLATES.TemplateResponse(
+            request=request,
+            name=template_name,
+            context={"message": message},
+            status_code=status_code,
+        )
 
     def label_error(
         request: Request, message: str, *, status_code: int = 404
     ) -> HTMLResponse:
-        return _TEMPLATES.TemplateResponse(
-            request=request,
-            name="label_error.html",
-            context={"message": message},
-            status_code=status_code,
+        return _error_response(
+            request, "label_error.html", message, status_code=status_code
+        )
+
+    def item_error(
+        request: Request, message: str, *, status_code: int = 404
+    ) -> HTMLResponse:
+        return _error_response(
+            request, "item_error.html", message, status_code=status_code
         )
 
     def invalid_label_token(
@@ -236,6 +263,59 @@ def create_app(
             }
         )
         return RedirectResponse(f"/?{query}", status_code=303)
+
+    @app.get("/items/{item_id}", response_class=HTMLResponse)
+    def item_transcript(request: Request, item_id: int) -> HTMLResponse:
+        with connect(database) as connection:
+            item = connection.execute(
+                """
+                SELECT coalesce(title, canonical_url), canonical_url, source,
+                       format, extracted_text_hash, chapters
+                FROM items
+                WHERE id = ?
+                """,
+                (item_id,),
+            ).fetchone()
+        if item is None:
+            return item_error(request, "Item not found")
+        (
+            title,
+            canonical_url,
+            source,
+            item_format,
+            extracted_text_hash,
+            chapters_json,
+        ) = item
+        if item_format not in TRANSCRIPT_FORMATS or extracted_text_hash is None:
+            return item_error(request, "No transcript is available for this item")
+        try:
+            chunks = load_transcript_chunks(
+                blob_store,
+                str(extracted_text_hash),
+                chapters_json,
+                item_id=item_id,
+            )
+        except (OSError, ValueError, TypeError):
+            return item_error(request, "No transcript is available for this item")
+        anchors = chunk_anchors(chunks)
+        entries = [
+            TranscriptChunkEntry(
+                anchor=anchors.get(chunk.id),
+                timestamp=format_timestamp(chunk.start_ms),
+                text=chunk.text,
+            )
+            for chunk in chunks
+        ]
+        return _TEMPLATES.TemplateResponse(
+            request=request,
+            name="transcript.html",
+            context={
+                "title": title,
+                "canonical_url": canonical_url,
+                "source": source,
+                "chunks": entries,
+            },
+        )
 
     @app.get("/items/{item_id}/labels/{label}", response_class=HTMLResponse)
     def confirm_label(request: Request, item_id: int, label: str) -> HTMLResponse:

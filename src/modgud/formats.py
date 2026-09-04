@@ -29,6 +29,10 @@ class ItemFormat(StrEnum):
     YOUTUBE = "youtube"
 
 
+# Formats whose extracted text is a timestamped transcript.
+TRANSCRIPT_FORMATS = frozenset({ItemFormat.YOUTUBE, ItemFormat.PODCAST})
+
+
 def detect_format(
     url: str,
     *,

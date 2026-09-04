@@ -6,13 +6,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from html import escape
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import urlencode
 
 from modgud.config import SecretValue
-from modgud.formats import ItemFormat
+from modgud.formats import TRANSCRIPT_FORMATS, ItemFormat
 from modgud.label_tokens import create_label_token
 from modgud.span_maps import SpanMap, get_span_map
 from modgud.summaries import Tier1Summary
+from modgud.transcripts import format_timestamp, transcript_anchor
 
 _INLINE_ITEM_LIMIT = 10
 _CAPTURE_ONLY = "Capture only — no summary is available."
@@ -32,6 +33,7 @@ class DigestItem:
     time_to_value_seconds: int | None
     summary: Tier1Summary | None
     span_map: SpanMap | None = None
+    has_transcript: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,22 +58,19 @@ def _item_metadata(item: DigestItem) -> str:
     return " · ".join(parts)
 
 
-def _format_timestamp(milliseconds: int) -> str:
-    total_seconds = milliseconds // 1_000
-    hours, remainder = divmod(total_seconds, 3_600)
-    minutes, seconds = divmod(remainder, 60)
-    if hours:
-        return f"{hours}:{minutes:02d}:{seconds:02d}"
-    return f"{minutes:02d}:{seconds:02d}"
+def _item_url(item_id: int, *segments: str, base_url: str) -> str:
+    path = "/".join(("items", str(item_id), *segments))
+    return f"{base_url.rstrip('/')}/{path}"
 
 
-def _span_link(item: DigestItem, start_ms: int) -> str | None:
-    if item.format is not ItemFormat.YOUTUBE:
+def _transcript_link(item: DigestItem, *, base_url: str) -> str:
+    return _item_url(item.id, base_url=base_url)
+
+
+def _span_link(transcript_link: str | None, start_ms: int) -> str | None:
+    if transcript_link is None:
         return None
-    parts = urlsplit(item.canonical_url)
-    timestamp = f"t={start_ms // 1_000}s"
-    query = f"{parts.query}&{timestamp}" if parts.query else timestamp
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+    return f"{transcript_link}#{transcript_anchor(start_ms)}"
 
 
 def _label_link(
@@ -88,10 +87,8 @@ def _label_link(
         signing_secret=signing_secret,
         expires_at=expires_at,
     )
-    return (
-        f"{base_url.rstrip('/')}/items/{item_id}/labels/{label}?"
-        f"{urlencode({'token': token})}"
-    )
+    url = _item_url(item_id, "labels", label, base_url=base_url)
+    return f"{url}?{urlencode({'token': token})}"
 
 
 def render_digest(
@@ -127,6 +124,11 @@ def render_digest(
             signing_secret=label_signing_secret,
             expires_at=expires_at,
         )
+        transcript_link = (
+            _transcript_link(item, base_url=label_base_url)
+            if item.has_transcript
+            else None
+        )
         if position > _INLINE_ITEM_LIMIT:
             if position == _INLINE_ITEM_LIMIT + 1:
                 text_parts.extend(["More items", "----------", ""])
@@ -134,30 +136,51 @@ def render_digest(
             description = (
                 item.summary.one_liner if item.summary is not None else _CAPTURE_ONLY
             )
-            text_parts.append(
+            text_line = (
                 f"{position}. {title} — {description} — {item.source} — "
                 f"{item.canonical_url} — 👍 Worth it: {worth_it_link} — "
                 f"👎 Not worth it: {not_worth_it_link}"
             )
-            html_parts.append(
+            html_line = (
                 f'<li><a href="{escape(item.canonical_url, quote=True)}">'
                 f"{escape(title)}</a> — {escape(description)} — "
                 f"{escape(item.source)}<br>"
                 f'<a href="{escape(worth_it_link, quote=True)}">👍 Worth it</a> · '
                 f'<a href="{escape(not_worth_it_link, quote=True)}">'
-                "👎 Not worth it</a></li>"
+                "👎 Not worth it</a>"
             )
+            if transcript_link is not None:
+                text_line = f"{text_line} — Full transcript: {transcript_link}"
+                html_line = (
+                    f"{html_line} · "
+                    f'<a href="{escape(transcript_link, quote=True)}">'
+                    "Full transcript</a>"
+                )
+            text_parts.append(text_line)
+            html_parts.append(f"{html_line}</li>")
             continue
-        text_parts.extend(
-            [
-                f"{position}. {title}",
-                f"   {metadata}",
-                f"   {item.canonical_url}",
-                f"   👍 Worth it: {worth_it_link}",
-                f"   👎 Not worth it: {not_worth_it_link}",
-                "",
-            ]
+        item_lines = [
+            f"{position}. {title}",
+            f"   {metadata}",
+            f"   {item.canonical_url}",
+            f"   👍 Worth it: {worth_it_link}",
+            f"   👎 Not worth it: {not_worth_it_link}",
+        ]
+        if transcript_link is not None:
+            item_lines.append(f"   Full transcript: {transcript_link}")
+        item_lines.append("")
+        text_parts.extend(item_lines)
+        html_links = (
+            f'<p><a href="{escape(worth_it_link, quote=True)}">'
+            "👍 Worth it</a> · "
+            f'<a href="{escape(not_worth_it_link, quote=True)}">'
+            "👎 Not worth it</a>"
         )
+        if transcript_link is not None:
+            html_links = (
+                f"{html_links} · "
+                f'<a href="{escape(transcript_link, quote=True)}">Full transcript</a>'
+            )
         html_parts.extend(
             [
                 "<article>",
@@ -166,12 +189,7 @@ def render_digest(
                     f"{escape(title)}</a></h2>"
                 ),
                 f"<p>{escape(metadata)}</p>",
-                (
-                    f'<p><a href="{escape(worth_it_link, quote=True)}">'
-                    "👍 Worth it</a> · "
-                    f'<a href="{escape(not_worth_it_link, quote=True)}">'
-                    "👎 Not worth it</a></p>"
-                ),
+                f"{html_links}</p>",
             ]
         )
         if item.summary is None:
@@ -199,10 +217,9 @@ def render_digest(
             html_parts.extend(["</ul>", "<h3>Span map</h3><ul>"])
             for span in item.span_map.spans:
                 timestamp = (
-                    f"{_format_timestamp(span.start_ms)}–"
-                    f"{_format_timestamp(span.end_ms)}"
+                    f"{format_timestamp(span.start_ms)}–{format_timestamp(span.end_ms)}"
                 )
-                link = _span_link(item, span.start_ms)
+                link = _span_link(transcript_link, span.start_ms)
                 text_line = f"   - {timestamp} — {span.description}"
                 if link is not None:
                     text_line = f"{text_line} — {link}"
@@ -268,7 +285,8 @@ def select_digest_items(connection: sqlite3.Connection) -> tuple[DigestItem, ...
                items.author,
                items.time_to_value_seconds,
                tier_1_summaries.one_liner,
-               tier_1_summaries.claims
+               tier_1_summaries.claims,
+               items.extracted_text_hash
         FROM qualifying_captures
         JOIN items ON items.id = qualifying_captures.item_id
         LEFT JOIN tier_1_summaries ON tier_1_summaries.item_id = items.id
@@ -279,18 +297,24 @@ def select_digest_items(connection: sqlite3.Connection) -> tuple[DigestItem, ...
                  items.id
         """
     ).fetchall()
-    return tuple(
-        DigestItem(
-            id=int(row[0]),
-            canonical_url=str(row[1]),
-            format=ItemFormat(row[2]),
-            state=str(row[3]),
-            source=str(row[4]),
-            title=str(row[5]) if row[5] is not None else None,
-            author=str(row[6]) if row[6] is not None else None,
-            time_to_value_seconds=int(row[7]) if row[7] is not None else None,
-            summary=_stored_summary(row[8], row[9]),
-            span_map=get_span_map(connection, int(row[0])),
+    items = []
+    for row in rows:
+        item_format = ItemFormat(row[2])
+        items.append(
+            DigestItem(
+                id=int(row[0]),
+                canonical_url=str(row[1]),
+                format=item_format,
+                state=str(row[3]),
+                source=str(row[4]),
+                title=str(row[5]) if row[5] is not None else None,
+                author=str(row[6]) if row[6] is not None else None,
+                time_to_value_seconds=int(row[7]) if row[7] is not None else None,
+                summary=_stored_summary(row[8], row[9]),
+                span_map=get_span_map(connection, int(row[0])),
+                has_transcript=(
+                    item_format in TRANSCRIPT_FORMATS and row[10] is not None
+                ),
+            )
         )
-        for row in rows
-    )
+    return tuple(items)

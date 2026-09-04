@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} · modgud{% endblock %}
+
+{% block content %}
+  <section class="transcript-page" aria-labelledby="transcript-title">
+    <p class="transcript-back"><a href="/">Back to captured items</a></p>
+    <h1 id="transcript-title"><a href="{{ canonical_url }}">{{ title }}</a></h1>
+    <p class="transcript-source">{{ source }}</p>
+    {% if chunks %}
+      <ol class="transcript-chunks">
+        {% for chunk in chunks %}
+          <li{% if chunk.anchor %} id="{{ chunk.anchor }}"{% endif %}>
+            {% if chunk.anchor %}
+              <a class="transcript-timestamp" href="#{{ chunk.anchor }}">{{ chunk.timestamp }}</a>
+            {% else %}
+              <span class="transcript-timestamp">{{ chunk.timestamp }}</span>
+            {% endif %}
+            <p class="transcript-text">{{ chunk.text }}</p>
+          </li>
+        {% endfor %}
+      </ol>
+    {% else %}
+      <p class="empty-library">No transcript content is available for this item.</p>
+    {% endif %}
+  </section>
+{% endblock %}
