@@ -33,7 +33,15 @@ via the routing config; never hardcode a provider or a base URL.
    check, and `uv run pytest`. Run each as a **separate command** — never
    `&&`-chained, because a failing early step would silently skip the rest.
 5. Commit, push {{branch.name}}, and open a non-draft pull request with the
-   local `gh` CLI.
+   local `gh` CLI. **This is the actual finish line for this turn** — the
+   orchestrator does not inspect local commits, only whether an open PR exists
+   for this branch. A correct, fully-committed fix that never gets pushed and
+   opened as a PR reads to the orchestrator as a wasted run: nothing reviews,
+   tests, or merges it. This run is a single headless turn with no later
+   resumption, so never background the quality gate and end your turn waiting
+   for it to finish — run it in the foreground, and if you are close to
+   running out of turn before it completes, stop waiting on it and push +
+   open the PR anyway, noting what you did not verify in the PR description.
 6. Remove the issue's `agent-ready` label after the PR is open.
 7. If the work cannot proceed, leave a `gh issue comment` describing what
    blocked it and exit cleanly.
