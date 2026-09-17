@@ -135,7 +135,7 @@ def summarize_item(
         raise ValueError(f"item {item_id} has no extracted text")
     extracted_content = blob_store.get(str(extracted_text_hash))
     source_texts: tuple[str, ...]
-    if item_format == "web":
+    if item_format in ("web", "pdf"):
         source_texts = (extracted_content.decode("utf-8"),)
     elif item_format == "youtube":
         chapters: tuple[Chapter, ...] = ()

@@ -1,8 +1,10 @@
-"""Readable text and metadata extraction for captured web pages."""
+"""Readable text and metadata extraction for captured web pages and PDFs."""
 
 from dataclasses import dataclass
+from io import BytesIO
 from urllib.parse import urlsplit
 
+from pypdf import PdfReader
 from trafilatura import bare_extraction
 from trafilatura.settings import Document
 
@@ -18,7 +20,11 @@ _BOILERPLATE_XPATH = (
 
 
 class ExtractionError(ValueError):
-    """Raised when a captured page has no extractable readable content."""
+    """Raised when captured content has no extractable readable content."""
+
+
+class NoTextLayerError(ExtractionError):
+    """Raised when a PDF parses cleanly but carries no extractable text."""
 
 
 @dataclass(frozen=True)
@@ -62,3 +68,38 @@ def extract_web_page(content: bytes, *, url: str) -> ExtractedPage:
         author=document.author or None,
         site=site or None,
     )
+
+
+@dataclass(frozen=True)
+class ExtractedPdf:
+    """Readable text and descriptive metadata from one PDF document."""
+
+    text: str
+    title: str | None
+    author: str | None
+
+
+def extract_pdf(content: bytes) -> ExtractedPdf:
+    """Extract a PDF's text and metadata, page by page.
+
+    Raises ``NoTextLayerError`` for a PDF that parses cleanly but has no
+    extractable text (for example, a scanned or image-only PDF), so callers
+    can treat that case as an expected, non-erroring outcome distinct from a
+    malformed file.
+    """
+    try:
+        reader = PdfReader(BytesIO(content))
+        page_texts = [page.extract_text() for page in reader.pages]
+        metadata = reader.metadata
+    except Exception as error:
+        raise ExtractionError(f"pdf extraction failed: {error}") from error
+
+    text = "\n\n".join(
+        page_text.strip() for page_text in page_texts if page_text.strip()
+    )
+    if not text:
+        raise NoTextLayerError("pdf contains no extractable text")
+
+    title = metadata.title if metadata is not None else None
+    author = metadata.author if metadata is not None else None
+    return ExtractedPdf(text=text, title=title or None, author=author or None)

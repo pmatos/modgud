@@ -1,8 +1,55 @@
-"""Behavioral tests for readable web-page extraction."""
+"""Behavioral tests for readable web-page and PDF extraction."""
+
+import io
 
 import pytest
+from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
-from modgud.extraction import ExtractionError, extract_web_page
+from modgud.extraction import (
+    ExtractionError,
+    NoTextLayerError,
+    extract_pdf,
+    extract_web_page,
+)
+
+
+def _pdf_bytes(
+    text: str | None,
+    *,
+    title: str | None = None,
+    author: str | None = None,
+) -> bytes:
+    """Build a minimal one-page PDF, optionally with a text layer and metadata."""
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=300, height=300)
+
+    if text is not None:
+        content = DecodedStreamObject()
+        content.set_data(f"BT /F1 24 Tf 20 250 Td ({text}) Tj ET".encode())
+        page[NameObject("/Contents")] = writer._add_object(content)
+
+        font = DictionaryObject()
+        font[NameObject("/Type")] = NameObject("/Font")
+        font[NameObject("/Subtype")] = NameObject("/Type1")
+        font[NameObject("/BaseFont")] = NameObject("/Helvetica")
+        fonts = DictionaryObject()
+        fonts[NameObject("/F1")] = writer._add_object(font)
+        resources = DictionaryObject()
+        resources[NameObject("/Font")] = fonts
+        page[NameObject("/Resources")] = resources
+
+    metadata = {}
+    if title is not None:
+        metadata["/Title"] = title
+    if author is not None:
+        metadata["/Author"] = author
+    if metadata:
+        writer.metadata = metadata
+
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
 
 
 @pytest.mark.parametrize(
@@ -189,3 +236,31 @@ def test_related_post_cards_are_not_part_of_readable_text() -> None:
 
     assert "A small service still needs an explicit recovery model" in page.text
     assert "The cost of saying yes has changed" not in page.text
+
+
+def test_extracts_pdf_text_and_metadata() -> None:
+    content = _pdf_bytes(
+        "Hello modgud PDF extraction",
+        title="A Test PDF",
+        author="Ada Rivera",
+    )
+
+    pdf = extract_pdf(content)
+
+    assert "Hello modgud PDF extraction" in pdf.text
+    assert (pdf.title, pdf.author) == ("A Test PDF", "Ada Rivera")
+
+
+def test_pdf_with_no_text_layer_raises_no_text_layer_error() -> None:
+    content = _pdf_bytes(None)
+
+    with pytest.raises(NoTextLayerError, match="no extractable text"):
+        extract_pdf(content)
+
+
+def test_corrupt_pdf_is_an_extraction_failure_not_a_missing_text_layer() -> None:
+    content = b"%PDF-1.7\nnot actually a well-formed PDF"
+
+    with pytest.raises(ExtractionError, match="pdf extraction failed") as excinfo:
+        extract_pdf(content)
+    assert excinfo.type is ExtractionError
