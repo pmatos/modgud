@@ -1,3 +1,4 @@
+import io
 import json
 import re
 import subprocess
@@ -12,6 +13,8 @@ from typing import ClassVar
 from urllib.parse import urlsplit
 
 import pytest
+from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from modgud.blobs import BlobStore
 from modgud.cli import main
@@ -188,6 +191,44 @@ def run_modgud(data_dir: Path, *arguments: str) -> subprocess.CompletedProcess[s
         capture_output=True,
         text=True,
     )
+
+
+def _pdf_bytes(
+    text: str | None,
+    *,
+    title: str | None = None,
+    author: str | None = None,
+) -> bytes:
+    """Build a minimal one-page PDF, optionally with a text layer and metadata."""
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=300, height=300)
+
+    if text is not None:
+        content = DecodedStreamObject()
+        content.set_data(f"BT /F1 24 Tf 20 250 Td ({text}) Tj ET".encode())
+        page[NameObject("/Contents")] = writer._add_object(content)
+
+        font = DictionaryObject()
+        font[NameObject("/Type")] = NameObject("/Font")
+        font[NameObject("/Subtype")] = NameObject("/Type1")
+        font[NameObject("/BaseFont")] = NameObject("/Helvetica")
+        fonts = DictionaryObject()
+        fonts[NameObject("/F1")] = writer._add_object(font)
+        resources = DictionaryObject()
+        resources[NameObject("/Font")] = fonts
+        page[NameObject("/Resources")] = resources
+
+    metadata = {}
+    if title is not None:
+        metadata["/Title"] = title
+    if author is not None:
+        metadata["/Author"] = author
+    if metadata:
+        writer.metadata = metadata
+
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
 
 
 def test_help_describes_the_command() -> None:
@@ -1151,7 +1192,6 @@ def test_add_records_web_extraction_failure_without_rejecting_capture(
     ("content_type", "raw_content", "expected_format"),
     [
         ("application/octet-stream", b"\x00\x01opaque source material", "unknown"),
-        ("application/pdf", b"%PDF-1.7\nsource", "pdf"),
         (
             "application/vnd.ms-powerpoint",
             b"legacy presentation bytes",
@@ -1179,6 +1219,106 @@ def test_add_accepts_unsupported_formats_as_unsummarizable(
     content_hash, item_format, state = item
     assert (item_format, state) == (expected_format, "unsummarizable")
     assert BlobStore(tmp_path / "blobs").get(content_hash) == raw_content
+
+
+def test_add_extracts_a_pdf_and_summarize_produces_a_tier_1_artifact(
+    tmp_path: Path,
+) -> None:
+    raw_content = _pdf_bytes(
+        "Smaller deployments reduce recovery time and limit operational risk.",
+        title="A Study of Safe Deployments",
+        author="Ada Rivera",
+    )
+    with serve(raw_content, content_type="application/pdf") as (url, _):
+        result = run_modgud(tmp_path, "add", url)
+
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item = connection.execute(
+            "SELECT extracted_text_hash, state, title, author, format FROM items"
+        ).fetchone()
+        event_types = [
+            row[0] for row in connection.execute("SELECT type FROM events ORDER BY id")
+        ]
+
+    assert result.returncode == 0, result.stderr
+    assert item is not None
+    extracted_text_hash, state, title, author, item_format = item
+    extracted_text = BlobStore(tmp_path / "blobs").get(extracted_text_hash).decode()
+    assert (state, title, author, item_format) == (
+        "extracted",
+        "A Study of Safe Deployments",
+        "Ada Rivera",
+        "pdf",
+    )
+    assert "Smaller deployments reduce recovery time" in extracted_text
+    assert event_types == ["captured", "extracted"]
+
+    summarize_result = run_modgud(tmp_path, "summarize", "1")
+
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        state_after_summarize = connection.execute(
+            "SELECT state FROM items WHERE id = 1"
+        ).fetchone()[0]
+        summary = connection.execute(
+            "SELECT one_liner, claims FROM tier_1_summaries WHERE item_id = 1"
+        ).fetchone()
+
+    assert summarize_result.returncode == 0, summarize_result.stderr
+    assert summarize_result.stdout == "Summarized item 1\n"
+    assert state_after_summarize == "summarized"
+    assert summary is not None
+
+
+def test_add_records_a_textless_pdf_as_unsummarizable_with_a_reason(
+    tmp_path: Path,
+) -> None:
+    raw_content = _pdf_bytes(None)
+    with serve(raw_content, content_type="application/pdf") as (url, _):
+        result = run_modgud(tmp_path, "add", url)
+
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item = connection.execute(
+            "SELECT content_hash, extracted_text_hash, state FROM items"
+        ).fetchone()
+        events = connection.execute(
+            "SELECT type, payload FROM events ORDER BY id"
+        ).fetchall()
+
+    assert result.returncode == 0, result.stderr
+    assert item is not None
+    content_hash, extracted_text_hash, state = item
+    assert (extracted_text_hash, state) == (None, "unsummarizable")
+    assert BlobStore(tmp_path / "blobs").get(content_hash) == raw_content
+    assert [event[0] for event in events] == ["captured", "unsummarizable"]
+    reason = json.loads(events[-1][1])
+    assert reason["stage"] == "extraction"
+    assert "no extractable text" in reason["reason"]
+
+
+def test_add_records_a_corrupt_pdf_as_failed_without_rejecting_capture(
+    tmp_path: Path,
+) -> None:
+    raw_content = b"%PDF-1.7\nnot actually a well-formed PDF"
+    with serve(raw_content, content_type="application/pdf") as (url, _):
+        result = run_modgud(tmp_path, "add", url)
+
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item = connection.execute(
+            "SELECT content_hash, extracted_text_hash, state FROM items"
+        ).fetchone()
+        events = connection.execute(
+            "SELECT type, payload FROM events ORDER BY id"
+        ).fetchall()
+
+    assert result.returncode == 0, result.stderr
+    assert item is not None
+    content_hash, extracted_text_hash, state = item
+    assert (extracted_text_hash, state) == (None, "failed")
+    assert BlobStore(tmp_path / "blobs").get(content_hash) == raw_content
+    assert [event[0] for event in events] == ["captured", "failed"]
+    failure = json.loads(events[-1][1])
+    assert failure["stage"] == "extraction"
+    assert "pdf extraction failed" in failure["error"]
 
 
 @pytest.mark.parametrize("submitted", ["not a URL", "http://[invalid"])
@@ -1248,7 +1388,7 @@ def test_matching_content_from_two_urls_resolves_to_the_existing_item(
     tmp_path: Path,
 ) -> None:
     raw_content = b"identical document bytes"
-    with serve(raw_content, content_type="application/pdf") as (url, handler):
+    with serve(raw_content, content_type="application/octet-stream") as (url, handler):
         first = run_modgud(tmp_path, "add", url)
         duplicate = run_modgud(tmp_path, "add", f"{url}/mirror")
 

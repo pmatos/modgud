@@ -16,7 +16,12 @@ from modgud.blobs import BlobStore
 from modgud.config import ConfigError, Settings, default_config_path, get_settings
 from modgud.database import connect
 from modgud.delivery import PostmarkEmailClient, deliver_digest
-from modgud.extraction import ExtractionError, extract_web_page
+from modgud.extraction import (
+    ExtractionError,
+    NoTextLayerError,
+    extract_pdf,
+    extract_web_page,
+)
 from modgud.formats import ItemFormat, detect_format
 from modgud.inbound import PostmarkClient, pending_inbound_captures, poll_inbound
 from modgud.origin_reports import render_origin_report
@@ -34,9 +39,7 @@ from modgud.urls import canonicalize_url
 from modgud.whisper_cpp import WhisperCppError, launch_server
 from modgud.youtube import ExtractedYouTube, extract_youtube
 
-_UNSUMMARIZABLE_FORMATS = frozenset(
-    {ItemFormat.DECK, ItemFormat.PDF, ItemFormat.UNKNOWN}
-)
+_UNSUMMARIZABLE_FORMATS = frozenset({ItemFormat.DECK, ItemFormat.UNKNOWN})
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +218,26 @@ def _record_caption_refusal(
     )
 
 
+def _record_unsummarizable(
+    connection: sqlite3.Connection,
+    *,
+    item_id: int,
+    reason: str,
+) -> None:
+    payload = json.dumps(
+        {"reason": reason, "stage": "extraction"},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    connection.execute(
+        """
+        INSERT INTO events (item_id, type, payload)
+        VALUES (?, 'unsummarizable', ?)
+        """,
+        (item_id, payload),
+    )
+
+
 def capture_url(
     data_dir: Path,
     url: str,
@@ -315,6 +338,7 @@ def capture_url(
     extracted_site = None
     extraction_error = None
     extraction_error_stage = "extraction"
+    unsummarizable_reason = None
     extracted_text = None
     caption_language = None
     caption_kind = None
@@ -353,10 +377,22 @@ def capture_url(
             title = extracted_page.title
             author = extracted_page.author
             extracted_site = extracted_page.site
+    elif fetch_error is None and item_format is ItemFormat.PDF:
+        try:
+            extracted_pdf = extract_pdf(content)
+        except NoTextLayerError as error:
+            unsummarizable_reason = f"{type(error).__name__}: {error}"
+        except ExtractionError as error:
+            extraction_error = f"{type(error).__name__}: {error}"
+        else:
+            extracted_text = extracted_pdf.text
+            extracted_text_hash = blob_store.put(extracted_text.encode("utf-8"))
+            title = extracted_pdf.title
+            author = extracted_pdf.author
 
     if fetch_error is not None:
         item_state = "failed"
-    elif item_format in _UNSUMMARIZABLE_FORMATS:
+    elif item_format in _UNSUMMARIZABLE_FORMATS or unsummarizable_reason is not None:
         item_state = "unsummarizable"
     elif extraction_error is not None:
         item_state = "failed"
@@ -473,6 +509,12 @@ def capture_url(
                 item_id=inserted_item_id,
                 error=extraction_error,
                 stage=extraction_error_stage,
+            )
+        elif unsummarizable_reason is not None:
+            _record_unsummarizable(
+                connection,
+                item_id=inserted_item_id,
+                reason=unsummarizable_reason,
             )
         if (
             extracted_youtube is not None

@@ -497,7 +497,7 @@ def test_poll_command_captures_extracted_url_with_email_origin(
             """
         ).fetchone()
 
-    assert item == (1, target_url, "pdf", "unsummarizable", "127.0.0.1")
+    assert item == (1, target_url, "pdf", "failed", "127.0.0.1")
     assert capture == {
         "canonical_url": target_url,
         "inbound_message_id": "message-1",
