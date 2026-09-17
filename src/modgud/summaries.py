@@ -85,6 +85,22 @@ def _request_summary(
     return None
 
 
+def get_tier_1_summary(
+    connection: sqlite3.Connection, item_id: int
+) -> Tier1Summary | None:
+    """Return the stored tier-1 artifact for an item, if one exists."""
+    row = connection.execute(
+        "SELECT one_liner, claims FROM tier_1_summaries WHERE item_id = ?",
+        (item_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    one_liner, claims_json = row
+    return Tier1Summary(
+        one_liner=str(one_liner), claims=tuple(json.loads(str(claims_json)))
+    )
+
+
 def summarize_item(
     connection: sqlite3.Connection,
     blob_store: BlobStore,

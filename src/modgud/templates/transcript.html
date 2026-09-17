@@ -7,6 +7,17 @@
     <p class="transcript-back"><a href="/">Back to captured items</a></p>
     <h1 id="transcript-title"><a href="{{ canonical_url }}">{{ title }}</a></h1>
     <p class="transcript-source">{{ source }}</p>
+    {% if summary %}
+      <section class="item-summary" aria-labelledby="item-summary-title">
+        <h2 id="item-summary-title">Summary</h2>
+        <p class="item-summary-one-liner">{{ summary.one_liner }}</p>
+        <ul class="item-summary-claims">
+          {% for claim in summary.claims %}
+            <li>{{ claim }}</li>
+          {% endfor %}
+        </ul>
+      </section>
+    {% endif %}
     {% if chunks %}
       <ol class="transcript-chunks">
         {% for chunk in chunks %}
@@ -20,7 +31,7 @@
           </li>
         {% endfor %}
       </ol>
-    {% else %}
+    {% elif chunks is not none %}
       <p class="empty-library">No transcript content is available for this item.</p>
     {% endif %}
   </section>

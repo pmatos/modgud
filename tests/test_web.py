@@ -2,6 +2,7 @@
 
 import json
 import re
+import sqlite3
 import sys
 import threading
 import time
@@ -951,6 +952,139 @@ def test_item_transcript_bounds_a_two_hour_transcript_to_structural_chunks(
     assert len(re.findall(r"<li[ >]", response.text)) == len(expected_chunks)
 
 
+def _insert_tier_1_summary(
+    connection: sqlite3.Connection,
+    item_id: int,
+    *,
+    one_liner: str,
+    claims: Sequence[str],
+) -> None:
+    connection.execute(
+        "INSERT INTO tier_1_summaries (item_id, one_liner, claims) VALUES (?, ?, ?)",
+        (item_id, one_liner, json.dumps(list(claims))),
+    )
+
+
+def test_item_page_shows_the_tier_1_summary_for_a_text_item_with_no_transcript(
+    tmp_path: Path,
+) -> None:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source, title
+            ) VALUES (
+                'https://example.com/article', 'article-item', ?,
+                'web', 'summarized', 'example.com', 'A useful article'
+            )
+            """,
+            ("a" * 64,),
+        ).lastrowid
+        assert item_id is not None
+        _insert_tier_1_summary(
+            connection,
+            item_id,
+            one_liner="A concise explanation of the article core idea.",
+            claims=[
+                "The first specific claim the article makes.",
+                "The second specific claim the article makes.",
+                "The third specific claim the article makes.",
+            ],
+        )
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/items/{item_id}")
+
+    assert response.status_code == 200
+    assert "A concise explanation of the article core idea." in response.text
+    assert "The first specific claim the article makes." in response.text
+    assert "The third specific claim the article makes." in response.text
+    assert "No transcript content is available" not in response.text
+
+
+def test_item_page_shows_the_tier_1_summary_above_the_transcript(
+    tmp_path: Path,
+) -> None:
+    transcript = _vtt_transcript([(0, 2_500, "Opening context worth knowing.")])
+    blob_store = BlobStore(tmp_path / "blobs")
+    transcript_hash = blob_store.put(transcript)
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source, title
+            ) VALUES (?, ?, ?, 'youtube', 'summarized', ?, ?)
+            """,
+            (
+                "https://www.youtube.com/watch?v=with-summary",
+                "with-summary-item",
+                transcript_hash,
+                "Practical Channel",
+                "A worthwhile conversation",
+            ),
+        ).lastrowid
+        assert item_id is not None
+        _insert_tier_1_summary(
+            connection,
+            item_id,
+            one_liner="A worthwhile conversation about a specific tradeoff.",
+            claims=[
+                "The first claim the conversation makes.",
+                "The second claim the conversation makes.",
+                "The third claim the conversation makes.",
+            ],
+        )
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/items/{item_id}")
+
+    assert response.status_code == 200
+    summary_at = response.text.index(
+        "A worthwhile conversation about a specific tradeoff."
+    )
+    transcript_at = response.text.index("Opening context worth knowing.")
+    assert summary_at < transcript_at
+
+
+def test_item_page_shows_the_tier_1_summary_when_the_stored_blob_is_missing(
+    tmp_path: Path,
+) -> None:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source
+            ) VALUES (
+                'https://www.youtube.com/watch?v=missing-blob-summary',
+                'missing-blob-summary-item', ?,
+                'youtube', 'summarized', 'Practical Channel'
+            )
+            """,
+            ("c" * 64,),
+        ).lastrowid
+        assert item_id is not None
+        _insert_tier_1_summary(
+            connection,
+            item_id,
+            one_liner="A worthwhile conversation despite the missing transcript.",
+            claims=[
+                "The first claim the conversation makes.",
+                "The second claim the conversation makes.",
+                "The third claim the conversation makes.",
+            ],
+        )
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/items/{item_id}")
+
+    assert response.status_code == 200
+    assert "A worthwhile conversation despite the missing transcript." in response.text
+    assert "No transcript content is available" not in response.text
+
+
 def test_item_transcript_404_for_a_missing_item(tmp_path: Path) -> None:
     with TestClient(create_app(tmp_path)) as client:
         response = client.get("/items/404")
@@ -974,7 +1108,7 @@ def test_item_transcript_404_when_format_has_no_transcript(tmp_path: Path) -> No
         response = client.get(f"/items/{item_id}")
 
     assert response.status_code == 404
-    assert "No transcript is available" in response.text
+    assert "No summary or transcript is available" in response.text
 
 
 def test_item_transcript_404_when_not_yet_transcribed(tmp_path: Path) -> None:
@@ -992,7 +1126,7 @@ def test_item_transcript_404_when_not_yet_transcribed(tmp_path: Path) -> None:
         response = client.get(f"/items/{item_id}")
 
     assert response.status_code == 404
-    assert "No transcript is available" in response.text
+    assert "No summary or transcript is available" in response.text
 
 
 def test_item_transcript_404_when_the_stored_blob_is_missing(tmp_path: Path) -> None:
@@ -1015,7 +1149,7 @@ def test_item_transcript_404_when_the_stored_blob_is_missing(tmp_path: Path) -> 
         response = client.get(f"/items/{item_id}")
 
     assert response.status_code == 404
-    assert "No transcript is available" in response.text
+    assert "No summary or transcript is available" in response.text
 
 
 def test_item_transcript_404_when_chapters_are_malformed(tmp_path: Path) -> None:
@@ -1041,7 +1175,7 @@ def test_item_transcript_404_when_chapters_are_malformed(tmp_path: Path) -> None
         response = client.get(f"/items/{item_id}")
 
     assert response.status_code == 404
-    assert "No transcript is available" in response.text
+    assert "No summary or transcript is available" in response.text
 
 
 def _settings_for_tier_2_endpoint(tmp_path: Path, endpoint: str) -> Settings:

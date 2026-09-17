@@ -32,6 +32,7 @@ from modgud.long_form_summaries import (
     request_long_form_summary,
 )
 from modgud.span_maps import load_transcript_chunks
+from modgud.summaries import get_tier_1_summary
 from modgud.transcripts import chunk_anchors, format_timestamp
 
 _PACKAGE_DIRECTORY = Path(__file__).parent
@@ -297,36 +298,42 @@ def create_app(
                 """,
                 (item_id,),
             ).fetchone()
-        if item is None:
-            return item_error(request, "Item not found")
-        (
-            title,
-            canonical_url,
-            source,
-            item_format,
-            extracted_text_hash,
-            chapters_json,
-        ) = item
-        if item_format not in TRANSCRIPT_FORMATS or extracted_text_hash is None:
-            return item_error(request, "No transcript is available for this item")
-        try:
-            chunks = load_transcript_chunks(
-                blob_store,
-                str(extracted_text_hash),
+            if item is None:
+                return item_error(request, "Item not found")
+            (
+                title,
+                canonical_url,
+                source,
+                item_format,
+                extracted_text_hash,
                 chapters_json,
-                item_id=item_id,
+            ) = item
+            summary = get_tier_1_summary(connection, item_id)
+        entries: list[TranscriptChunkEntry] | None = None
+        if item_format in TRANSCRIPT_FORMATS and extracted_text_hash is not None:
+            try:
+                chunks = load_transcript_chunks(
+                    blob_store,
+                    str(extracted_text_hash),
+                    chapters_json,
+                    item_id=item_id,
+                )
+            except (OSError, ValueError, TypeError):
+                chunks = None
+            if chunks is not None:
+                anchors = chunk_anchors(chunks)
+                entries = [
+                    TranscriptChunkEntry(
+                        anchor=anchors.get(chunk.id),
+                        timestamp=format_timestamp(chunk.start_ms),
+                        text=chunk.text,
+                    )
+                    for chunk in chunks
+                ]
+        if entries is None and summary is None:
+            return item_error(
+                request, "No summary or transcript is available for this item"
             )
-        except (OSError, ValueError, TypeError):
-            return item_error(request, "No transcript is available for this item")
-        anchors = chunk_anchors(chunks)
-        entries = [
-            TranscriptChunkEntry(
-                anchor=anchors.get(chunk.id),
-                timestamp=format_timestamp(chunk.start_ms),
-                text=chunk.text,
-            )
-            for chunk in chunks
-        ]
         return _TEMPLATES.TemplateResponse(
             request=request,
             name="transcript.html",
@@ -335,6 +342,7 @@ def create_app(
                 "canonical_url": canonical_url,
                 "source": source,
                 "chunks": entries,
+                "summary": summary,
             },
         )
 
