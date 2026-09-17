@@ -319,8 +319,8 @@ def create_app(
                     item_id=item_id,
                 )
             except (OSError, ValueError, TypeError):
-                chunks = None
-            if chunks is not None:
+                pass
+            else:
                 anchors = chunk_anchors(chunks)
                 entries = [
                     TranscriptChunkEntry(

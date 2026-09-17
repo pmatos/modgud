@@ -96,9 +96,12 @@ def get_tier_1_summary(
     if row is None:
         return None
     one_liner, claims_json = row
-    return Tier1Summary(
-        one_liner=str(one_liner), claims=tuple(json.loads(str(claims_json)))
-    )
+    claims = json.loads(str(claims_json))
+    if not isinstance(claims, list) or any(
+        not isinstance(claim, str) for claim in claims
+    ):
+        raise ValueError("stored tier-1 claims must be an array of strings")
+    return Tier1Summary(one_liner=str(one_liner), claims=tuple(claims))
 
 
 def summarize_item(
