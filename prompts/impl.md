@@ -44,7 +44,11 @@ via the routing config; never hardcode a provider or a base URL.
    open the PR anyway, noting what you did not verify in the PR description.
 6. Remove the issue's `agent-ready` label after the PR is open.
 7. If the work cannot proceed, leave a `gh issue comment` describing what
-   blocked it and exit cleanly.
+   blocked it, write `BLOCKED.md` in the workspace root (uncommitted) with the
+   same explanation, and exit 0. The orchestrator gates this state's advance
+   on `BLOCKED.md` not existing — a Bash tool call's `exit 1` only ends that
+   subshell, not the provider session, so it cannot signal failure on its
+   own.
 
 ## Scope
 
