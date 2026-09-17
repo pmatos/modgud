@@ -14,6 +14,16 @@ workflow:
         provider: claude
         prompt: prompts/impl.md
       transitions:
+        # A blocked pass writes BLOCKED.md instead of relying on a non-zero
+        # exit code -- exiting non-zero from a Bash tool call only ends that
+        # subshell, not the provider session, so provider_success reads true
+        # regardless. Ordered before the success transition below: a run that
+        # commits real progress and then hits a blocker later in the same
+        # turn must still route to failed, not coast into wait_for_pr_open on
+        # branch_ahead_of_base alone.
+        - to: failed
+          when:
+            artifact_exists: BLOCKED.md
         # branch_ahead_of_base only proves the agent committed something --
         # it says nothing about whether it ever pushed and opened the PR
         # prompts/impl.md tells it to (vow-lang/vow#1277: an implement run
@@ -60,6 +70,13 @@ workflow:
         provider: claude
         prompt: prompts/code-review-fix.md
       transitions:
+        # A blocked pass (no open PR to review, etc.) writes BLOCKED.md
+        # instead of relying on a non-zero exit code -- exiting non-zero from
+        # a Bash tool call only ends that subshell, not the provider session,
+        # so provider_success reads true regardless.
+        - to: failed
+          when:
+            artifact_exists: BLOCKED.md
         - to: simplify
           when:
             provider_success: true
@@ -71,6 +88,9 @@ workflow:
         provider: claude
         prompt: prompts/simplify.md
       transitions:
+        - to: failed
+          when:
+            artifact_exists: BLOCKED.md
         - to: wait_for_pr
           when:
             provider_success: true
@@ -130,6 +150,9 @@ workflow:
         provider: claude
         prompt: prompts/autofix-pr.md
       transitions:
+        - to: failed
+          when:
+            artifact_exists: BLOCKED.md
         - to: wait_for_pr
           when:
             provider_success: true
@@ -141,6 +164,9 @@ workflow:
         provider: claude
         prompt: prompts/resolve-conflicts.md
       transitions:
+        - to: failed
+          when:
+            artifact_exists: BLOCKED.md
         - to: wait_for_pr
           when:
             provider_success: true

@@ -41,11 +41,15 @@ need the number. Stay on branch `{{branch.name}}`. Do not open a second PR.
 
 ## Exit
 
-Exit 0 once the rebase or merge is clean and pushed. The orchestrator
-re-checks `mergeable` on the next tick and routes accordingly.
+Exit 0 once the rebase or merge is clean and pushed, and no `BLOCKED.md`
+exists in the workspace. The orchestrator re-checks `mergeable` on the next
+tick and routes accordingly.
 
 If the conflicts genuinely cannot be resolved without a product decision, post
-a `gh pr comment` describing what blocked you and **exit non-zero** to end the
-run as blocked. Exiting 0 without resolving would return the FSM to
-`wait_for_pr`, which would observe the same `mergeable: false` signal and route
-straight back here — an infinite loop.
+a `gh pr comment` describing what blocked you, then **write `BLOCKED.md` in
+the workspace root** (uncommitted) with the same explanation and exit 0. A
+Bash tool call's `exit 1` only ends that subshell, not the provider session,
+so it cannot make `provider_success` false — exiting non-zero here would
+silently return the FSM to `wait_for_pr`, which would observe the same
+`mergeable: false` signal and route straight back here, an infinite loop.
+Writing `BLOCKED.md` is what the FSM actually gates this state's advance on.

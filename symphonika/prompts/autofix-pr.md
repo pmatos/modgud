@@ -37,15 +37,22 @@ if you need the PR number — do not assume one. Stay on branch
 
 ## Exit
 
-Exit 0 once the gate passes and you have pushed the fix. The orchestrator
-re-enters the wait state, re-checks the PR, and either loops back here,
-advances to merge, or terminates on the next signal snapshot.
+Exit 0 once the gate passes and you have pushed the fix, and no `BLOCKED.md`
+exists in the workspace. The orchestrator re-enters the wait state,
+re-checks the PR, and either loops back here, advances to merge, or
+terminates on the next signal snapshot.
 
 If you genuinely cannot make progress — the failure needs a product decision,
-say — post a `gh pr comment` explaining what blocked you and **exit
-non-zero**. That routes the FSM through `provider_success: false` to the
-`failed` catch-all and ends the run as blocked.
+say — post a `gh pr comment` explaining what blocked you, then **write
+`BLOCKED.md` in the workspace root** (uncommitted) with the same explanation
+and exit 0. A Bash tool call's `exit 1` only ends that subshell, not the
+provider session, so it cannot make `provider_success` false — exiting
+non-zero here would silently return the FSM to `wait_for_pr`, which would
+observe the same failing signals and route straight back into this state, an
+infinite loop. Writing `BLOCKED.md` is what the FSM actually gates this
+state's advance on.
 
-Exiting 0 without fixing anything would set `provider_success: true`, return
-the FSM to `wait_for_pr`, which would observe the same failing signals and
-route straight back into this state — an infinite loop.
+Exiting 0 without fixing anything and without writing `BLOCKED.md` would set
+`provider_success: true`, return the FSM to `wait_for_pr`, which would
+observe the same failing signals and route straight back into this state —
+the same infinite loop.
