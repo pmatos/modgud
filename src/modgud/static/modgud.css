@@ -506,6 +506,32 @@ h1 {
   color: var(--muted-ink);
 }
 
+.item-summary {
+  margin: 0 0 2rem;
+  padding-bottom: 2rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.item-summary h2 {
+  margin: 0 0 0.6rem;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.1rem;
+}
+
+.item-summary-one-liner {
+  margin: 0 0 1rem;
+  line-height: 1.65;
+}
+
+.item-summary-claims {
+  display: grid;
+  gap: 0.6rem;
+  margin: 0;
+  padding-left: 1.25rem;
+  color: var(--muted-ink);
+  line-height: 1.6;
+}
+
 .transcript-chunks {
   display: grid;
   gap: 1.5rem;

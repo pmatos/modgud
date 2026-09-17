@@ -1,6 +1,5 @@
 """Select and render items for the next digest."""
 
-import json
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -12,7 +11,7 @@ from modgud.config import SecretValue
 from modgud.formats import TRANSCRIPT_FORMATS, ItemFormat
 from modgud.label_tokens import create_label_token
 from modgud.span_maps import SpanMap, get_span_map
-from modgud.summaries import Tier1Summary
+from modgud.summaries import Tier1Summary, parse_stored_claims
 from modgud.transcripts import format_timestamp, transcript_anchor
 
 _INLINE_ITEM_LIMIT = 10
@@ -247,14 +246,9 @@ def _stored_summary(one_liner: object, claims_json: object) -> Tier1Summary | No
         return None
     if one_liner is None or claims_json is None:
         raise ValueError("stored tier-1 summary must have one-liner and claims")
-    claims = json.loads(str(claims_json))
-    if not isinstance(claims, list) or any(
-        not isinstance(claim, str) for claim in claims
-    ):
-        raise ValueError("stored tier-1 claims must be an array of strings")
     return Tier1Summary(
         one_liner=str(one_liner),
-        claims=tuple(claims),
+        claims=parse_stored_claims(claims_json),
     )
 
 
