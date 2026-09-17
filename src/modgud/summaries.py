@@ -85,6 +85,21 @@ def _request_summary(
     return None
 
 
+def parse_stored_claims(claims_json: object) -> tuple[str, ...]:
+    """Decode and validate one stored ``tier_1_summaries.claims`` cell.
+
+    Shared by every reader of the table (this module, ``digests.py``) since
+    the CHECK constraint on the column enforces array shape but not element
+    types.
+    """
+    claims = json.loads(str(claims_json))
+    if not isinstance(claims, list) or any(
+        not isinstance(claim, str) for claim in claims
+    ):
+        raise ValueError("stored tier-1 claims must be an array of strings")
+    return tuple(claims)
+
+
 def get_tier_1_summary(
     connection: sqlite3.Connection, item_id: int
 ) -> Tier1Summary | None:
@@ -96,12 +111,9 @@ def get_tier_1_summary(
     if row is None:
         return None
     one_liner, claims_json = row
-    claims = json.loads(str(claims_json))
-    if not isinstance(claims, list) or any(
-        not isinstance(claim, str) for claim in claims
-    ):
-        raise ValueError("stored tier-1 claims must be an array of strings")
-    return Tier1Summary(one_liner=str(one_liner), claims=tuple(claims))
+    return Tier1Summary(
+        one_liner=str(one_liner), claims=parse_stored_claims(claims_json)
+    )
 
 
 def summarize_item(

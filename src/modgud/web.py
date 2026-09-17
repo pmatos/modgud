@@ -287,7 +287,7 @@ def create_app(
         return RedirectResponse(f"/?{query}", status_code=303)
 
     @app.get("/items/{item_id}", response_class=HTMLResponse)
-    def item_transcript(request: Request, item_id: int) -> HTMLResponse:
+    def item_detail(request: Request, item_id: int) -> HTMLResponse:
         with connect(database) as connection:
             item = connection.execute(
                 """
