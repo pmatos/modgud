@@ -465,8 +465,9 @@ def capture_url(
                 author,
                 channel,
                 duration_seconds,
-                chapters
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                chapters,
+                page_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 canonical_url,
@@ -480,6 +481,7 @@ def capture_url(
                 channel,
                 duration_seconds,
                 chapters,
+                extracted_podcast.page_url if extracted_podcast is not None else None,
             ),
         )
         inserted_item_id = cursor.lastrowid

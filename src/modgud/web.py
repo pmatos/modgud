@@ -205,14 +205,14 @@ def create_app(
             captured_item = None
             if capture in {"added", "existing"} and item is not None:
                 captured_item = connection.execute(
-                    "SELECT id, canonical_url FROM items WHERE id = ?",
+                    "SELECT id, coalesce(page_url, canonical_url) FROM items WHERE id = ?",
                     (item,),
                 ).fetchone()
             rows = connection.execute(
                 """
                 SELECT items.id,
                        coalesce(items.title, items.canonical_url),
-                       items.canonical_url,
+                       coalesce(items.page_url, items.canonical_url),
                        items.source,
                        items.format,
                        items.state,
@@ -291,7 +291,7 @@ def create_app(
         with connect(database) as connection:
             item = connection.execute(
                 """
-                SELECT coalesce(title, canonical_url), canonical_url, source,
+                SELECT coalesce(title, canonical_url), coalesce(page_url, canonical_url), source,
                        format, extracted_text_hash, chapters
                 FROM items
                 WHERE id = ?
@@ -372,7 +372,7 @@ def create_app(
         with connect(database) as connection:
             item = connection.execute(
                 """
-                SELECT coalesce(title, canonical_url), canonical_url, source,
+                SELECT coalesce(title, canonical_url), coalesce(page_url, canonical_url), source,
                        format, extracted_text_hash
                 FROM items
                 WHERE id = ?
@@ -443,7 +443,7 @@ def create_app(
         with connect(database) as connection:
             item = connection.execute(
                 """
-                SELECT coalesce(title, canonical_url), canonical_url
+                SELECT coalesce(title, canonical_url), coalesce(page_url, canonical_url)
                 FROM items
                 WHERE id = ?
                 """,
@@ -472,7 +472,7 @@ def create_app(
         with connect(database) as connection:
             item = connection.execute(
                 """
-                SELECT coalesce(title, canonical_url), canonical_url
+                SELECT coalesce(title, canonical_url), coalesce(page_url, canonical_url)
                 FROM items
                 WHERE id = ?
                 """,

@@ -15,6 +15,7 @@ _MIGRATIONS = (
     Path(__file__).with_name("migrations") / "009_digest_schedule.sql",
     Path(__file__).with_name("migrations") / "010_span_maps.sql",
     Path(__file__).with_name("migrations") / "011_tier_2_summaries.sql",
+    Path(__file__).with_name("migrations") / "012_item_page_url.sql",
 )
 _SCHEMA_VERSION = len(_MIGRATIONS)
 

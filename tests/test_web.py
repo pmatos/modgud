@@ -220,6 +220,36 @@ def test_item_list_shows_capture_details(tmp_path: Path) -> None:
     assert re.search(r">\s*3 min\s*<", response.text)
 
 
+def test_item_list_links_an_episode_to_its_page_not_its_internal_identity(
+    tmp_path: Path,
+) -> None:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, format, state, source, title, page_url
+            ) VALUES (
+                'podcast:abc/episode-guid', 'episode', 'podcast', 'captured',
+                'Systems Show', 'Queues Are Coordination',
+                'https://example.com/episodes/queues'
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO events (item_id, type, payload, created_at)
+            VALUES (?, 'captured', '{}', '2026-09-03T08:30:00.000Z')
+            """,
+            (item.lastrowid,),
+        )
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get("/")
+
+    assert 'href="https://example.com/episodes/queues"' in response.text
+    assert "podcast:abc" not in response.text
+
+
 def test_item_list_filters_by_format(tmp_path: Path) -> None:
     with connect(tmp_path / "modgud.sqlite3") as connection:
         for url, content_hash, item_format, title in (

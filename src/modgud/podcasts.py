@@ -7,7 +7,7 @@ from hashlib import sha256
 from html.parser import HTMLParser
 from math import isfinite
 from typing import cast
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 from xml.etree import ElementTree
 
 from modgud.urls import canonicalize_url
@@ -49,6 +49,7 @@ class PodcastEpisode:
     canonical_url: str
     feed_url: str
     guid: str
+    page_url: str | None
     title: str | None
     author: str | None
     podcast_title: str | None
@@ -158,10 +159,13 @@ def parse_podcast_feed(
         selected.raw_element,
         feed_url=canonical_feed_url,
     )
+    if episode_url is not None and audio_url is None and not transcripts:
+        raise PodcastFeedError("feed entry has no audio or transcript")
     return PodcastEpisode(
         canonical_url=canonical_url,
         feed_url=canonical_feed_url,
         guid=selected.guid,
+        page_url=_web_url(selected.page_url, base=canonical_feed_url),
         title=selected.title,
         author=selected.author,
         podcast_title=podcast_title,
@@ -375,6 +379,13 @@ def _duration_seconds(value: str | None) -> float | None:
     if duration < 0 or not isfinite(duration):
         return None
     return duration
+
+
+def _web_url(url: str | None, *, base: str) -> str | None:
+    if url is None:
+        return None
+    resolved = urljoin(base, url)
+    return resolved if urlsplit(resolved).scheme in {"http", "https"} else None
 
 
 def _text(element: ElementTree.Element | None) -> str | None:

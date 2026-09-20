@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from modgud.database import apply_migrations, connect
+from modgud.database import _MIGRATIONS, apply_migrations, connect
 
 
 def test_opening_a_new_database_creates_the_durable_store(tmp_path: Path) -> None:
@@ -341,3 +341,44 @@ def test_applying_migrations_twice_is_a_no_op(tmp_path: Path) -> None:
 
     assert migration_left_transaction_untouched
     assert item_count == 0
+
+
+def test_page_url_backfill_prefers_a_captured_page_over_the_feed(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    legacy = sqlite3.connect(database)
+    for migration in _MIGRATIONS[:11]:
+        legacy.executescript(migration.read_text(encoding="utf-8"))
+    for canonical_url, content_hash in (
+        ("podcast:abc/from-page", "one"),
+        ("podcast:abc/from-feed", "two"),
+        ("https://example.com/article", "three"),
+    ):
+        legacy.execute(
+            """
+            INSERT INTO items (canonical_url, content_hash, format, state, source)
+            VALUES (?, ?, 'podcast', 'captured', 'example.com')
+            """,
+            (canonical_url, content_hash),
+        )
+    feed = "https://example.com/feed.xml"
+    page = "https://example.com/posts/one"
+    for item_id, url in ((1, page), (1, feed), (2, feed), (3, page)):
+        legacy.execute(
+            "INSERT INTO events (item_id, type, payload) VALUES (?, 'captured', ?)",
+            (item_id, f'{{"feed_url":"{feed}","url":"{url}"}}'),
+        )
+    legacy.commit()
+    legacy.close()
+
+    with connect(database) as connection:
+        page_urls = connection.execute(
+            "SELECT canonical_url, page_url FROM items ORDER BY id"
+        ).fetchall()
+
+    assert page_urls == [
+        ("podcast:abc/from-page", page),
+        ("podcast:abc/from-feed", feed),
+        ("https://example.com/article", None),
+    ]
