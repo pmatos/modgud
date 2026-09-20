@@ -573,3 +573,85 @@ The specifics are worth keeping, because they are the reason nobody should retry
   Postmark adapter and a real recording double, on a genuine process boundary. That is what two adapters
   looks like.
 
+
+### Adjudication
+
+Criteria, applied in order: **depth**, **locality**, **seam placement**, **test surface**, **blast radius**.
+An advisor reviewed the four written designs against them.
+
+**Winner: Design C, the item-bound `ItemLog` — with the encoding decision taken from Design D.**
+
+- **Depth** — C is the only design where a caller learns one name and receives the ten-type vocabulary by
+  autocompleting `log.`. `log.unsummarizable(reason)` hides the `'unsummarizable'` literal *and* the embedded
+  `stage: "extraction"`. A has the smallest interface but hides the least: the event-type string and the
+  payload key names stay tribal knowledge at the call sites, and five conditional dict-builders stay put.
+  B exports twelve names over a ~20-line implementation and its own author classifies it as "wide and
+  shallow-ish" — that is criterion 1 failing by self-report.
+- **Locality** — B and C both concentrate the key names and the omit-if-None rule; A does not. B is then
+  set back by its own mechanism: `dataclasses.fields()` + `getattr` makes Python field names the wire
+  format, so renaming `Captured.origin` changes the stored key and breaks
+  `origin_reports.py`'s `json_extract(payload,'$.origin')` with no type error anywhere. That is a *new*
+  delocalised failure introduced by the fix. C builds each payload dict explicitly, so renaming a parameter
+  does not move a key.
+- **Seam placement** — A, B and C tie: all three put the seam at `events ↔ callers`, where sixteen callers
+  genuinely vary, and all three decline to abstract `events ↔ sqlite3`, where nothing varies. D
+  self-eliminates on this criterion, by its own author's verdict.
+- **Test surface** — B and C are close; both pin every payload shape through the interface. C edges it
+  because its shapes are explicit rather than reflected. B's golden key-set test is load-bearing precisely
+  *because* of the reflection hazard, which is a worse position to be in than not needing it.
+- **Blast radius** — a tie-break only, and the first four criteria had already settled it. It confirms
+  rather than decides: C is 8 files with no test files edited and a net reduction; B is 8 files at roughly
+  +10 net lines plus two non-mechanical drags outside the event-writing lines.
+
+**The runner-up design is B (typed event values)**, losing on depth (twelve exported names over a twenty-line
+implementation) and on trading one delocalised failure for another (field names silently becoming wire
+format). Its `Omittable[T]` insight is nonetheless the sharpest thing any of the four produced, and C
+reproduces the behaviour it names — omission versus `null` — through explicit per-method dict construction.
+
+#### One change against all four designs: keep `ensure_ascii` at its default
+
+All four sub-agents independently converged on `ensure_ascii=False`. That consensus is not adopted, for
+three reasons:
+
+1. **The candidate was scored on preserving stored bytes.** `ensure_ascii=False` changes the rendering at
+   fourteen sites; leaving the default changes it at one (`summaries.py:214`). There is no zero-change
+   option, so the smaller diff wins.
+2. **The autonomy contract forbids changing a stored format beyond what the picked candidate strictly
+   requires.** Collapsing sixteen duplicated writers does not require re-deciding the encoding. As Design
+   D's author observed, being able to flip it later in one line *is* the payoff of the seam — not something
+   to spend now, before a human has reviewed the seam itself.
+3. **The default is strictly more robust here, which is the opposite of what three designs assumed.**
+   `cli.py:64` decodes fetched bytes with `surrogateescape`, so a lone surrogate can reach a payload field.
+   Verified directly against the project toolchain:
+
+   ```
+   json.dumps({"error": "\udc80bad"}, ensure_ascii=False)  → binds:  UnicodeEncodeError
+   json.dumps({"error": "\udc80bad"})                      → binds:  OK  ('{"error":"\\udc80bad"}')
+   ```
+
+   `ensure_ascii=False` would therefore turn a survivable capture failure into an unhandled exception at the
+   sqlite binding, at fourteen sites that are safe today. Taking the default also makes Design C's proposed
+   `backslashreplace` guard unnecessary — it existed only to patch a hazard that `ensure_ascii=False`
+   introduces.
+
+   The corresponding equivalence was also verified, so the one site that *does* change is safe:
+   `json_extract` and `json_type` return identical results for `'{"o":"café"}'` and `'{"o":"café"}'`.
+
+So the canonical encoding is `json.dumps(fields, separators=(",", ":"), sort_keys=True)` — the fourteen-site
+majority, now stated once. `web.py:485`'s missing `sort_keys` is a no-op on its single-key payload, so that
+site is byte-identical; `summaries.py:214`'s `summarized` payload is the only site whose bytes change, and
+only when a summary contains non-ASCII text.
+
+#### Two objections considered and not treated as blocking
+
+- **`ItemLog` lifetime versus transaction lifetime.** C's author flags that an `ItemLog` outliving its
+  `with connect(...)` block would write into a transaction nobody commits, losing the row silently. The
+  hazard is real but bounded: `ItemLog(connection, item_id)` requires `connection`, which only exists once
+  the `with` statement has bound it, so the object cannot be hoisted above the block. The remaining failure
+  mode is deliberately storing or returning one, which the class docstring forbids. A and B carry the same
+  hazard in a different shape — a `record(connection, ...)` call placed after the `with` exits is equally
+  silent.
+- **`digest_sent` is not an item event.** `delivery.py:193` staples it to `item_ids[0]`. An item-bound
+  object forces the caller to name an item in order to record a fleet-level fact. C's own framing is
+  accepted: this makes an existing data-model wart louder rather than papering over it. The behaviour is
+  preserved verbatim and the wart is left for a human.
