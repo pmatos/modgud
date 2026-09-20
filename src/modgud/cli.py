@@ -474,8 +474,8 @@ def _summarize(data_dir: Path, item_id: int, settings: Settings) -> None:
 
 def _reprocess(data_dir: Path, item_id: int) -> None:
     with connect(data_dir / "modgud.sqlite3") as connection:
-        result = reprocess_item(connection, BlobStore(data_dir / "blobs"), item_id)
-    print(f"Reprocessed item {result.item_id}: {result.state}")
+        state = reprocess_item(connection, BlobStore(data_dir / "blobs"), item_id)
+    print(f"Reprocessed item {item_id}: {state}")
 
 
 def _span_map(data_dir: Path, item_id: int, settings: Settings) -> None:

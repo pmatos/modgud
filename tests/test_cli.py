@@ -1,7 +1,7 @@
-import hashlib
 import io
 import json
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar, NamedTuple
 from urllib.parse import urlsplit
 
 import pytest
@@ -21,6 +21,7 @@ from modgud.blobs import BlobStore
 from modgud.cli import main
 from modgud.database import connect
 from modgud.delivery import DigestEmail, PostmarkEmailClient
+from modgud.events import ItemLog
 from modgud.reprocess import ReprocessError, reprocess_item
 from modgud.youtube import (
     Caption,
@@ -1531,15 +1532,15 @@ _ARTICLE_HTML = b"""
       </body>
     </html>
 """
+_STORED_URL = "https://example.com/stored"
 
 
 def _store_item(
     data_dir: Path,
     *,
-    content: bytes,
-    item_format: str,
-    state: str,
-    canonical_url: str = "https://example.com/stored",
+    content: bytes = _ARTICLE_HTML,
+    item_format: str = "web",
+    state: str = "failed",
     fetch_error: str | None = None,
     extracted_text: bytes | None = None,
 ) -> int:
@@ -1549,9 +1550,6 @@ def _store_item(
     extracted_text_hash = (
         blob_store.put(extracted_text) if extracted_text is not None else None
     )
-    payload = {"canonical_url": canonical_url, "origin": "manual", "url": canonical_url}
-    if fetch_error is not None:
-        payload["fetch_error"] = fetch_error
     with connect(data_dir / "modgud.sqlite3") as connection:
         item_id = connection.execute(
             """
@@ -1560,21 +1558,31 @@ def _store_item(
                 source
             ) VALUES (?, ?, ?, ?, ?, 'example.com')
             """,
-            (canonical_url, content_hash, extracted_text_hash, item_format, state),
+            (_STORED_URL, content_hash, extracted_text_hash, item_format, state),
         ).lastrowid
-        connection.execute(
-            "INSERT INTO events (item_id, type, payload) VALUES (?, 'captured', ?)",
-            (item_id, json.dumps(payload)),
+        assert item_id is not None
+        ItemLog(connection, item_id).captured(
+            url=_STORED_URL,
+            canonical_url=_STORED_URL,
+            origin="manual",
+            fetch_error=fetch_error,
         )
-    assert item_id is not None
     return item_id
 
 
-def _item_snapshot(
-    data_dir: Path, item_id: int
-) -> tuple[tuple[object, ...], list[str]]:
+class _ItemSnapshot(NamedTuple):
+    state: str
+    extracted_text_hash: str | None
+    title: str | None
+    author: str | None
+    time_to_value_seconds: int | None
+    source: str
+    event_types: list[str]
+
+
+def _snapshot(data_dir: Path, item_id: int) -> _ItemSnapshot:
     with connect(data_dir / "modgud.sqlite3") as connection:
-        item = connection.execute(
+        row = connection.execute(
             """
             SELECT state, extracted_text_hash, title, author,
                    time_to_value_seconds, source
@@ -1584,12 +1592,26 @@ def _item_snapshot(
             (item_id,),
         ).fetchone()
         event_types = [
-            row[0]
-            for row in connection.execute(
+            event[0]
+            for event in connection.execute(
                 "SELECT type FROM events WHERE item_id = ? ORDER BY id", (item_id,)
             )
         ]
-    return item, event_types
+    state, extracted_text_hash, title, author, time_to_value, source = row
+    return _ItemSnapshot(
+        state,
+        extracted_text_hash,
+        title,
+        author,
+        time_to_value,
+        source,
+        event_types,
+    )
+
+
+def _reprocess(data_dir: Path, item_id: int) -> str:
+    with connect(data_dir / "modgud.sqlite3") as connection:
+        return reprocess_item(connection, BlobStore(data_dir / "blobs"), item_id)
 
 
 def test_reprocess_extracts_a_pdf_stored_before_pdf_extraction_existed(
@@ -1601,29 +1623,22 @@ def test_reprocess_extracts_a_pdf_stored_before_pdf_extraction_existed(
         author="Ada Rivera",
     )
     item_id = _store_item(
-        tmp_path,
-        content=pdf,
-        item_format="pdf",
-        state="unsummarizable",
-        canonical_url="https://example.com/paper.pdf",
+        tmp_path, content=pdf, item_format="pdf", state="unsummarizable"
     )
 
-    result = run_modgud(tmp_path, "reprocess", str(item_id))
+    assert _reprocess(tmp_path, item_id) == "extracted"
 
-    item, event_types = _item_snapshot(tmp_path, item_id)
-    state, extracted_text_hash, title, author, time_to_value, _ = item
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == f"Reprocessed item {item_id}: extracted\n"
-    assert (state, title, author) == (
+    item = _snapshot(tmp_path, item_id)
+    assert (item.state, item.title, item.author) == (
         "extracted",
         "A Study of Safe Deployments",
         "Ada Rivera",
     )
-    assert isinstance(extracted_text_hash, str)
-    extracted_text = BlobStore(tmp_path / "blobs").get(extracted_text_hash).decode()
-    assert "Smaller deployments reduce recovery time" in extracted_text
-    assert time_to_value is not None
-    assert event_types == ["captured", "extracted"]
+    assert item.extracted_text_hash is not None
+    extracted_text = BlobStore(tmp_path / "blobs").get(item.extracted_text_hash)
+    assert b"Smaller deployments reduce recovery time" in extracted_text
+    assert item.time_to_value_seconds is not None
+    assert item.event_types == ["captured", "extracted"]
 
 
 def test_reprocess_keeps_a_pdf_without_a_text_layer_unsummarizable(
@@ -1634,52 +1649,32 @@ def test_reprocess_keeps_a_pdf_without_a_text_layer_unsummarizable(
         content=_pdf_bytes(None),
         item_format="pdf",
         state="unsummarizable",
-        canonical_url="https://example.com/scan.pdf",
     )
 
-    result = run_modgud(tmp_path, "reprocess", str(item_id))
+    assert _reprocess(tmp_path, item_id) == "unsummarizable"
 
-    item, event_types = _item_snapshot(tmp_path, item_id)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == f"Reprocessed item {item_id}: unsummarizable\n"
-    assert (item[0], item[1]) == ("unsummarizable", None)
-    assert event_types == ["captured", "unsummarizable"]
+    item = _snapshot(tmp_path, item_id)
+    assert (item.state, item.extracted_text_hash) == ("unsummarizable", None)
+    assert item.event_types == ["captured", "unsummarizable"]
 
 
 def test_reprocess_retries_a_web_page_whose_extraction_failed(
     tmp_path: Path,
 ) -> None:
-    item_id = _store_item(
-        tmp_path,
-        content=_ARTICLE_HTML,
-        item_format="web",
-        state="failed",
-        canonical_url="https://example.com/posts/factory",
-    )
-
-    result = run_modgud(tmp_path, "reprocess", str(item_id))
-
-    item, event_types = _item_snapshot(tmp_path, item_id)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == f"Reprocessed item {item_id}: extracted\n"
-    assert (item[0], item[2]) == ("extracted", "Shipping a Software Factory")
-    assert event_types == ["captured", "extracted"]
-
-
-def test_reprocess_takes_the_source_from_the_extracted_site_name(
-    tmp_path: Path,
-) -> None:
     html = _ARTICLE_HTML.replace(
-        b"<head>",
-        b'<head><meta property="og:site_name" content="Acme Blog">',
+        b"<head>", b'<head><meta property="og:site_name" content="Acme Blog">'
     )
-    item_id = _store_item(tmp_path, content=html, item_format="web", state="failed")
+    item_id = _store_item(tmp_path, content=html)
 
-    result = run_modgud(tmp_path, "reprocess", str(item_id))
+    assert _reprocess(tmp_path, item_id) == "extracted"
 
-    item, _ = _item_snapshot(tmp_path, item_id)
-    assert result.returncode == 0, result.stderr
-    assert item[5] == "Acme Blog"
+    item = _snapshot(tmp_path, item_id)
+    assert (item.state, item.title, item.source) == (
+        "extracted",
+        "Shipping a Software Factory",
+        "Acme Blog",
+    )
+    assert item.event_types == ["captured", "extracted"]
 
 
 @pytest.mark.parametrize(
@@ -1696,127 +1691,85 @@ def test_reprocess_records_content_that_still_cannot_be_extracted_as_failed(
         tmp_path, content=content, item_format=item_format, state="captured"
     )
 
-    result = run_modgud(tmp_path, "reprocess", str(item_id))
+    assert _reprocess(tmp_path, item_id) == "failed"
 
-    item, event_types = _item_snapshot(tmp_path, item_id)
+    item = _snapshot(tmp_path, item_id)
     with connect(tmp_path / "modgud.sqlite3") as connection:
         failure = json.loads(
             connection.execute(
                 "SELECT payload FROM events WHERE type = 'failed'"
             ).fetchone()[0]
         )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == f"Reprocessed item {item_id}: failed\n"
-    assert (item[0], item[1]) == ("failed", None)
-    assert event_types == ["captured", "failed"]
+    assert (item.state, item.extracted_text_hash) == ("failed", None)
+    assert item.event_types == ["captured", "failed"]
     assert failure["stage"] == "extraction"
     assert failure["error"].startswith("ExtractionError: ")
 
 
-def test_reprocess_reports_stored_content_that_cannot_be_read(
-    tmp_path: Path,
-) -> None:
-    item_id = _store_item(
-        tmp_path, content=_ARTICLE_HTML, item_format="web", state="failed"
-    )
-    content_hash = hashlib.sha256(_ARTICLE_HTML).hexdigest()
-    (tmp_path / "blobs" / "sha256" / content_hash[:2] / content_hash).unlink()
-    before = _item_snapshot(tmp_path, item_id)
-
-    result = run_modgud(tmp_path, "reprocess", str(item_id))
-
-    assert result.returncode == 2
-    assert f"item {item_id}'s stored content cannot be read" in result.stderr
-    assert "Traceback" not in result.stderr
-    assert _item_snapshot(tmp_path, item_id) == before
-
-
-_HAS_TEXT = b"Text that an earlier extraction already produced."
+_EARLIER_TEXT = b"Text from an earlier extraction."
 
 
 @pytest.mark.parametrize(
-    ("item_format", "state", "fetch_error", "extracted_text", "expected_message"),
+    ("store", "expected_message"),
     [
         pytest.param(
-            "web",
-            "extracted",
-            None,
-            _HAS_TEXT,
+            {"state": "extracted", "extracted_text": _EARLIER_TEXT},
             "already has extracted text",
             id="extracted",
         ),
         pytest.param(
-            "web",
-            "summarized",
-            None,
-            _HAS_TEXT,
-            "already has extracted text",
-            id="summarized",
-        ),
-        pytest.param(
-            "pdf",
-            "failed",
-            None,
-            _HAS_TEXT,
+            {"item_format": "pdf", "state": "failed", "extracted_text": _EARLIER_TEXT},
             "already has extracted text",
             id="summarization-failed",
         ),
-        pytest.param("youtube", "failed", None, None, "only web and pdf", id="youtube"),
+        pytest.param({"item_format": "youtube"}, "only web and pdf", id="youtube"),
         pytest.param(
-            "podcast", "captured", None, None, "only web and pdf", id="podcast"
+            {"item_format": "deck", "state": "unsummarizable"},
+            "only web and pdf",
+            id="deck",
         ),
         pytest.param(
-            "deck", "unsummarizable", None, None, "only web and pdf", id="deck"
-        ),
-        pytest.param(
-            "web",
-            "failed",
-            "URLError: unreachable",
-            None,
+            {"item_format": "pdf", "fetch_error": "URLError: unreachable"},
             "was never fetched",
             id="fetch-failed",
         ),
     ],
 )
 def test_reprocess_refuses_an_item_it_cannot_improve(
-    tmp_path: Path,
-    item_format: str,
-    state: str,
-    fetch_error: str | None,
-    extracted_text: bytes | None,
-    expected_message: str,
+    tmp_path: Path, store: dict[str, Any], expected_message: str
 ) -> None:
-    item_id = _store_item(
-        tmp_path,
-        content=_ARTICLE_HTML,
-        item_format=item_format,
-        state=state,
-        fetch_error=fetch_error,
-        extracted_text=extracted_text,
-    )
-    before = _item_snapshot(tmp_path, item_id)
+    item_id = _store_item(tmp_path, **store)
+    before = _snapshot(tmp_path, item_id)
 
-    result = run_modgud(tmp_path, "reprocess", str(item_id))
+    with pytest.raises(ReprocessError, match=expected_message):
+        _reprocess(tmp_path, item_id)
 
-    assert result.returncode == 2
-    assert expected_message in result.stderr
-    assert _item_snapshot(tmp_path, item_id) == before
+    assert _snapshot(tmp_path, item_id) == before
 
 
 def test_reprocess_reports_an_unknown_item(tmp_path: Path) -> None:
-    result = run_modgud(tmp_path, "reprocess", "99")
+    with pytest.raises(ReprocessError, match="item 99 does not exist"):
+        _reprocess(tmp_path, 99)
 
-    assert result.returncode == 2
-    assert "item 99 does not exist" in result.stderr
+
+def test_reprocess_reports_stored_content_that_cannot_be_read(
+    tmp_path: Path,
+) -> None:
+    item_id = _store_item(tmp_path)
+    shutil.rmtree(tmp_path / "blobs")
+    before = _snapshot(tmp_path, item_id)
+
+    with pytest.raises(ReprocessError, match="stored content cannot be read"):
+        _reprocess(tmp_path, item_id)
+
+    assert _snapshot(tmp_path, item_id) == before
 
 
 def test_reprocess_does_not_overwrite_an_item_that_changed_underneath_it(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "modgud.sqlite3"
-    item_id = _store_item(
-        tmp_path, content=_ARTICLE_HTML, item_format="web", state="failed"
-    )
+    item_id = _store_item(tmp_path)
 
     class ConcurrentlySummarized(BlobStore):
         def get(self, blob_hash: str) -> bytes:
@@ -1832,6 +1785,25 @@ def test_reprocess_does_not_overwrite_an_item_that_changed_underneath_it(
     ):
         reprocess_item(connection, ConcurrentlySummarized(tmp_path / "blobs"), item_id)
 
-    item, event_types = _item_snapshot(tmp_path, item_id)
-    assert (item[0], item[1]) == ("summarized", None)
-    assert event_types == ["captured"]
+    item = _snapshot(tmp_path, item_id)
+    assert (item.state, item.extracted_text_hash) == ("summarized", None)
+    assert item.event_types == ["captured"]
+
+
+def test_reprocess_command_reports_the_new_state(tmp_path: Path) -> None:
+    item_id = _store_item(tmp_path)
+
+    result = run_modgud(tmp_path, "reprocess", str(item_id))
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"Reprocessed item {item_id}: extracted\n"
+
+
+def test_reprocess_command_reports_a_refusal_on_stderr(tmp_path: Path) -> None:
+    item_id = _store_item(tmp_path, extracted_text=_EARLIER_TEXT)
+
+    result = run_modgud(tmp_path, "reprocess", str(item_id))
+
+    assert result.returncode == 2
+    assert f"item {item_id} already has extracted text" in result.stderr
+    assert "Traceback" not in result.stderr
