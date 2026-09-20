@@ -492,9 +492,18 @@ and annotating `cli.py:340`'s `extraction_error_stage` to close the failure-stag
 ```python
 class ItemLog:
     def __init__(self, connection: sqlite3.Connection, item_id: int) -> None: ...
-    def captured(self, *, url, canonical_url, origin, inbound_message_id=None,
-                 fetch_error=None, podcast=None) -> None: ...
+    def captured(
+        self,
+        *,
+        url,
+        canonical_url,
+        origin,
+        inbound_message_id=None,
+        fetch_error=None,
+        podcast=None,
+    ) -> None: ...
     def unsummarizable(self, reason: str) -> None: ...
+
     # ... ten methods, one per event type
 ```
 
