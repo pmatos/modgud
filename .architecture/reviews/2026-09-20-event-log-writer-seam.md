@@ -61,7 +61,7 @@ implementation.
   and event-type literals move into one module that owns the `events` table, rather than dispersing back to
   their callers. Delete the seam afterwards and it disperses again to sixteen places. Concentrates. Passes.
 - **Solution**: add `src/modgud/events.py` owning the append-only event log: an `EventType` enumeration of
-  the eleven literals currently spelled as bare SQL strings, and one `record_event(connection, item_id,
+  the ten literals currently spelled as bare SQL strings, and one `record_event(connection, item_id,
   event_type, fields)` writer that performs the canonical encoding and the insert. Replace the five `cli.py`
   helpers and the eleven other call sites with calls to it. Payload bytes are preserved exactly at every
   site; the refactor is a pure re-seating of where the encoding lives.
@@ -391,4 +391,185 @@ types, which makes naming the record a smaller and safer next change.
 
 ## Design
 
-Written at step 4; see below.
+Four interfaces were produced in parallel by sub-agents, each briefed to commit to a radically different
+direction and to be honest about what its direction is bad at. All four are recorded here before
+adjudication, so the verdict is made against the written designs rather than against memory.
+
+**A correction all four designs surfaced independently**: the `events` table carries **ten** event types,
+not eleven. `pending` belongs to `tier_2_summaries.status` (`long_form_summaries.py:127`), a different
+table. Verified directly: `captured`, `extracted`, `failed`, `caption_refused`, `unsummarizable`,
+`summarized`, `audio_fallback`, `podcast_transcript`, `digest_sent`, `label`. The candidate card above has
+been corrected.
+
+**A constraint all four converged on**: the encoding drift can be resolved either way without breaking a
+test. All 39 `FROM events` assertions decode through `json.loads`, `json_extract`, `count(*)`, or read
+`type` alone; the only raw-payload string comparisons (`tests/test_database.py:220,290`) compare against
+literals the test itself inserted. `web.py:485`'s missing `sort_keys` is a no-op because its payload has one
+key. So the only live question is `ensure_ascii`, and the log is append-only, so old rows keep whatever form
+they were written with either way.
+
+### Design A — minimal surface
+
+**Interface**: one public name.
+
+```python
+def record(
+    connection: sqlite3.Connection,
+    item_id: int,
+    event_type: str,
+    /,
+    **fields: object,
+) -> None:
+```
+
+Positional-only parameters are load-bearing rather than stylistic: with `**fields` absorbing the payload,
+a field named `connection` or `item_id` would otherwise collide with a parameter.
+
+**Usage**: `events.record(connection, item_id, "label", label=label)` replaces four lines at `web.py:484`.
+Three of the five `cli.py` helpers are deleted outright; `_record_capture` and `_record_extraction` survive
+as thin field-assembly helpers because their conditional fields still have to be assembled somewhere.
+
+**Hides**: the table name and column order, that the payload is JSON text, the serialisation dialect, and
+that the log is append-only (no update or delete is offered).
+
+**Dependency strategy**: `sqlite3` stays visible in the signature deliberately. One adapter, so the
+`events ↔ sqlite3` boundary is a hypothetical seam and is correctly not abstracted. The real seam is
+`events ↔ callers`.
+
+**Drift verdict**: `ensure_ascii=False` everywhere, on the grounds that it is the only *deliberate* choice
+in the tree — `summaries.py:214`, `cli.py:169`, `cli.py:351` all type it, while the fourteen defaulting
+sites inherited a default nobody chose.
+
+**Its own stated weaknesses**: no static check on the event type (`"labels"` typechecks) and none on field
+names (`reasan=reason` typechecks) — which is *strictly worse* than the three `cli.py` helpers being
+deleted, whose keyword-only signatures did give mypy something to check. `delivery.py:174-195` is the
+worst-served caller: its conditional `**{...} if ... else {}` splat has to move inside an argument list and
+reads worse than what it replaced. Five conditional callers keep building dicts, so leverage there is ~6
+lines out of 25 rather than 18 out of 23.
+
+**Blast radius**: 8 files, no test files edited, net line count down.
+
+### Design B — typed event values
+
+**Interface**: twelve frozen dataclasses (one per payload shape — note *twelve*, because `extracted` and
+`failed` each have two distinct real shapes), a `Literal` alias per closed vocabulary, an `Omittable[T]`
+alias with an `OMITTED` sentinel, and one writer.
+
+```python
+type Omittable[T] = T | Absent          # T, or no key at all — distinct from T | None, which stores null
+def record(connection, item_id: int, event: Event, *rest: Event) -> None:
+```
+
+The central mechanism is that **omission is a type, not a convention**. The existing code needs both
+behaviours in one payload: `_record_capture`'s `origin` is `str | None` and is always written (including as
+`"origin":null`, which `tests/test_inbound.py:501` asserts and `origin_reports.py:12` reads via
+`json_type`), while `fetch_error` is `str | None` and is dropped when absent. A blanket drop-`None` encoder
+would silently break `origin`.
+
+**Hides**: everything A hides, plus the payload key names, the omit-versus-null rule, and the event-type
+strings. `mypy --strict` rejects a missing field, a typo'd field, and a wrong `Literal`.
+
+**Drift verdict**: `ensure_ascii=False`, same reasoning as A.
+
+**Its own stated weaknesses**, stated frankly by its author: net line count in `src/` is **+10** — this
+design does not shrink the codebase, and "anyone selling this as a line reduction is wrong". Twelve exported
+names for a ~20-line implementation; by its own assessment the module is "wide and shallow-ish", with its
+value in compile-time enforcement rather than hidden complexity. `payload()` uses `dataclasses.fields()` +
+`getattr`, so **Python field names silently become the wire format** — renaming `Captured.origin` changes
+the stored key and breaks `origin_reports.py`'s `json_extract(payload,'$.origin')` with no type error
+anywhere, which is a new silent-failure class. The `feed_url`/`guid` both-or-neither invariant is lost and
+paid for with a duplicated ternary pair at two call sites. Two classes per SQL type breaks the 1:1 mental
+model.
+
+**Blast radius**: 8 files, but drags two non-mechanical changes outside the event-writing lines — retyping
+`web.py:48-51`'s `_LABEL_NAMES` to `dict[LabelName, str]` (touching a handler that writes no event at all),
+and annotating `cli.py:340`'s `extraction_error_stage` to close the failure-stage vocabulary.
+
+### Design C — an item-bound log
+
+**Interface**: one class bound to `(connection, item_id)`, with one method per event type.
+
+```python
+class ItemLog:
+    def __init__(self, connection: sqlite3.Connection, item_id: int) -> None: ...
+    def captured(self, *, url, canonical_url, origin, inbound_message_id=None,
+                 fetch_error=None, podcast=None) -> None: ...
+    def unsummarizable(self, reason: str) -> None: ...
+    # ... ten methods, one per event type
+```
+
+Shaped around the dominant write: *"I am inside a transaction, I have one `item_id`, and I am about to
+append one or two events about it."* Three call sites write two events in a row to the same item
+(`audio_fallbacks.py:89+96` and `131+138`, `podcast_transcripts.py:228+235`), and `capture_url` makes eight
+recorder calls that all re-pass the same connection and item id.
+
+**Usage**: `capture_url` needs **3 `ItemLog` constructions to serve 8 recorder calls**, eliminating 16
+re-passed arguments; `log.failed(error=..., stage=...)` and `log.unsummarizable(reason)` drop from six-line
+and five-line calls to one line each. The five `cli.py` helpers (106 lines) are deleted; `cli.py` goes
+796 → ~680. `import json` leaves `audio_fallbacks.py` and `web.py` entirely.
+
+**Hides**: everything A hides, plus the payload key names, the omit-if-None rule, the embedded constants
+(`log.unsummarizable(reason)` hides both the `'unsummarizable'` literal *and* `stage: "extraction"`), the
+ten-type vocabulary (discoverable by autocompleting `log.`), and that `item_id` must be repeated.
+
+**Dependency strategy**: concrete `sqlite3.Connection`, one adapter, hypothetical seam, deliberately not
+abstracted — same verdict as A and B. One `Protocol` is used, `PodcastIdentity`, and not for
+substitutability: it inverts a dependency (so `events.py` need not import `podcasts.py`) and keeps the
+`feed_url`/`guid` pair together so a half-populated `captured` payload is unrepresentable — the exact
+invariant Design B admits it loses.
+
+**Drift verdict**: `ensure_ascii=False`, plus a `backslashreplace` guard present at none of the sixteen
+sites. `cli.py:64` decodes fetched bytes with `surrogateescape`, and a lone surrogate reaching
+`json.dumps(..., ensure_ascii=False)` makes `sqlite3` raise `UnicodeEncodeError` on binding — where today's
+fourteen `ensure_ascii=True` sites would have escaped it harmlessly. The guard re-escapes only unencodable
+code points, so the single encoder is as robust as the safest current site.
+
+**Its own stated weaknesses**: the sharpest is that **object lifetime versus transaction lifetime fails
+silently**. `sqlite3.Connection.__exit__` commits but does not close, and the repo never closes connections,
+so an `ItemLog` that outlives its `with connect(...)` block does not raise — it writes into a fresh implicit
+transaction nobody will commit, and the row is lost with no error. The shape invites the mistake, because
+`audio_fallbacks.py:55` opens its `with` inside a per-item loop where `item_id` is already in scope above
+it. Mitigation is three docstring rules, which is convention, not enforcement. Second: `digest_sent` is not
+an item event at all — `delivery.py:193` staples it to `item_ids[0]` — so an item-bound object forces the
+caller to name an item to log a fleet-level fact. Third: one-off callers (`web.py`, `delivery.py`) pay a
+throwaway-object idiom whose amortisation premise does not apply to them.
+
+**Blast radius**: 8 files, 0 test files edited, 16 `INSERT INTO events` in `src/` → 1.
+
+### Design D — ports and adapters
+
+**Interface**: an `EventLog` `Protocol` (`append`, `events_for`, `latest`), a `SqliteEventLog` adapter, and
+an `EventLogSessions` factory.
+
+Recorded here because its negative verdict is the useful part, and its author reached it unprompted:
+
+> **The seam is hypothetical.** One adapter, five extra tables dragged in to keep atomicity, two leaked
+> implementation details, a read half with zero production callers, and a test surface that hides all three
+> of the table's real invariants.
+
+The specifics are worth keeping, because they are the reason nobody should retry this direction here:
+
+- **Atomicity forces the port to grow into a datastore port.** All six writer modules write something else
+  in the same transaction — `items`, `postmark_inbound_messages`, `tier_1_summaries`, `digest_schedule`.
+  An `EventLog`-only port cannot express `audio_fallbacks.py:118-145`'s `UPDATE items` landing or failing
+  with its two event writes. The port preserves atomicity only by covering five more tables.
+- **A composition root cannot own the adapter's lifetime.** `database.py:23` opens connections without
+  `check_same_thread=False`, and `web.py:278` calls `capture_url` on a threadpool worker via
+  `run_in_threadpool`. A connection-backed adapter constructed in `create_app` would raise
+  `ProgrammingError` when it crossed that boundary. The only constructible adapter is one bound to a path —
+  which is `connect(database)` with a wrapper around it.
+- **`BEGIN IMMEDIATE` leaks through the port.** Four sites (`cli.py:256,418`, `delivery.py:139`,
+  `inbound.py:279`) take the write lock explicitly. A `transaction()` that hides the connection must name a
+  SQLite locking mode in its own signature.
+- **The read half has no production callers.** All four readers are analytic SQL joining `events` to
+  `items` — window functions in `origin_reports.py:9-53`, a `max(id)` watermark in `digests.py:255-293`.
+  None is expressible as `events_for(item_id)`; behind a port each would become a method whose only possible
+  implementation is that exact SQL, an interface as complex as what it hides.
+- **The in-memory fake does not count as a second adapter.** The three properties the table actually
+  guarantees — the `ON DELETE RESTRICT` foreign key, the `json_valid(payload)` CHECK, and the append-only
+  triggers — are SQLite's and are unreproducible in a list of dataclasses. A fake that cannot fail the way
+  production fails is a test double, not an adapter.
+- Where a port *is* right in this repo: `delivery.EmailClient` (`delivery.py:64-67`), which has a real
+  Postmark adapter and a real recording double, on a genuine process boundary. That is what two adapters
+  looks like.
+
