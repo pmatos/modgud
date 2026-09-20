@@ -10,7 +10,7 @@ from typing import cast
 from urllib.parse import urljoin, urlsplit
 from xml.etree import ElementTree
 
-from modgud.urls import canonicalize_url
+from modgud.urls import canonicalize_url, is_web_url
 
 _ITUNES_NAMESPACE = "http://www.itunes.com/dtds/podcast-1.0.dtd"
 _ATOM_NAMESPACE = "http://www.w3.org/2005/Atom"
@@ -136,18 +136,19 @@ def parse_podcast_feed(
                 -entry.position,
             ),
         )
+        page_url = _web_url(selected.page_url, base=canonical_feed_url)
     else:
         canonical_episode_url = canonicalize_url(episode_url)
         matching = [
             entry
             for entry in entries
-            if entry.page_url is not None
-            and canonicalize_url(urljoin(canonical_feed_url, entry.page_url))
+            if _web_url(entry.page_url, base=canonical_feed_url)
             == canonical_episode_url
         ]
         if not matching:
             raise PodcastFeedError("episode page is not present in its feed")
         selected = matching[0]
+        page_url = canonical_episode_url
 
     feed_hash = sha256(canonical_feed_url.encode("utf-8")).hexdigest()
     canonical_url = f"podcast:{feed_hash}/{selected.guid}"
@@ -165,7 +166,7 @@ def parse_podcast_feed(
         canonical_url=canonical_url,
         feed_url=canonical_feed_url,
         guid=selected.guid,
-        page_url=_web_url(selected.page_url, base=canonical_feed_url),
+        page_url=page_url,
         title=selected.title,
         author=selected.author,
         podcast_title=podcast_title,
@@ -384,8 +385,13 @@ def _duration_seconds(value: str | None) -> float | None:
 def _web_url(url: str | None, *, base: str) -> str | None:
     if url is None:
         return None
-    resolved = urljoin(base, url)
-    return resolved if urlsplit(resolved).scheme in {"http", "https"} else None
+    try:
+        resolved = urljoin(base, url)
+        if not is_web_url(urlsplit(resolved)):
+            return None
+        return canonicalize_url(resolved)
+    except ValueError:
+        return None
 
 
 def _text(element: ElementTree.Element | None) -> str | None:

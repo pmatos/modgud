@@ -220,8 +220,19 @@ def test_item_list_shows_capture_details(tmp_path: Path) -> None:
     assert re.search(r">\s*3 min\s*<", response.text)
 
 
+@pytest.mark.parametrize(
+    ("title", "expected_link_text"),
+    [
+        pytest.param(
+            "Queues Are Coordination", ">Queues Are Coordination<", id="titled"
+        ),
+        pytest.param(None, ">https://example.com/episodes/queues<", id="titleless"),
+    ],
+)
 def test_item_list_links_an_episode_to_its_page_not_its_internal_identity(
     tmp_path: Path,
+    title: str | None,
+    expected_link_text: str,
 ) -> None:
     with connect(tmp_path / "modgud.sqlite3") as connection:
         item = connection.execute(
@@ -230,10 +241,10 @@ def test_item_list_links_an_episode_to_its_page_not_its_internal_identity(
                 canonical_url, content_hash, format, state, source, title, page_url
             ) VALUES (
                 'podcast:abc/episode-guid', 'episode', 'podcast', 'captured',
-                'Systems Show', 'Queues Are Coordination',
-                'https://example.com/episodes/queues'
+                'Systems Show', ?, 'https://example.com/episodes/queues'
             )
-            """
+            """,
+            (title,),
         )
         connection.execute(
             """
@@ -247,6 +258,7 @@ def test_item_list_links_an_episode_to_its_page_not_its_internal_identity(
         response = client.get("/")
 
     assert 'href="https://example.com/episodes/queues"' in response.text
+    assert expected_link_text in response.text
     assert "podcast:abc" not in response.text
 
 

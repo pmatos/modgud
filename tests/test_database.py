@@ -382,3 +382,37 @@ def test_page_url_backfill_prefers_a_captured_page_over_the_feed(
         ("podcast:abc/from-feed", feed),
         ("https://example.com/article", None),
     ]
+
+
+def test_page_url_backfill_recognizes_a_feed_resubmitted_with_a_trailing_slash(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    legacy = sqlite3.connect(database)
+    for migration in _MIGRATIONS[:11]:
+        legacy.executescript(migration.read_text(encoding="utf-8"))
+    legacy.execute(
+        """
+        INSERT INTO items (canonical_url, content_hash, format, state, source)
+        VALUES ('podcast:abc/guid', 'one', 'podcast', 'captured', 'example.com')
+        """
+    )
+    feed = "https://example.com/feed.xml"
+    page = "https://example.com/episodes/queues"
+    # An older capture recorded the genuine episode page; a later recapture
+    # resubmitted the feed URL itself with a cosmetic trailing slash, which
+    # must not be mistaken for a second, distinct page URL.
+    for url in (page, f"{feed}/"):
+        legacy.execute(
+            "INSERT INTO events (item_id, type, payload) VALUES (1, 'captured', ?)",
+            (f'{{"feed_url":"{feed}","url":"{url}"}}',),
+        )
+    legacy.commit()
+    legacy.close()
+
+    with connect(database) as connection:
+        page_url = connection.execute(
+            "SELECT page_url FROM items WHERE id = 1"
+        ).fetchone()[0]
+
+    assert page_url == page

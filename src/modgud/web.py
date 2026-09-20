@@ -34,6 +34,7 @@ from modgud.long_form_summaries import (
 from modgud.span_maps import load_transcript_chunks
 from modgud.summaries import get_tier_1_summary
 from modgud.transcripts import chunk_anchors, format_timestamp
+from modgud.urls import is_web_url
 
 _PACKAGE_DIRECTORY = Path(__file__).parent
 _TEMPLATES = Jinja2Templates(directory=_PACKAGE_DIRECTORY / "templates")
@@ -49,6 +50,8 @@ _LABEL_NAMES = {
     "worth-it": "Worth it",
     "not-worth-it": "Not worth it",
 }
+_DISPLAY_URL_SQL = "coalesce(page_url, canonical_url)"
+_DISPLAY_TITLE_SQL = f"coalesce(title, {_DISPLAY_URL_SQL})"
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,14 +208,14 @@ def create_app(
             captured_item = None
             if capture in {"added", "existing"} and item is not None:
                 captured_item = connection.execute(
-                    "SELECT id, coalesce(page_url, canonical_url) FROM items WHERE id = ?",
+                    f"SELECT id, {_DISPLAY_URL_SQL} FROM items WHERE id = ?",
                     (item,),
                 ).fetchone()
             rows = connection.execute(
-                """
+                f"""
                 SELECT items.id,
-                       coalesce(items.title, items.canonical_url),
-                       coalesce(items.page_url, items.canonical_url),
+                       {_DISPLAY_TITLE_SQL},
+                       {_DISPLAY_URL_SQL},
                        items.source,
                        items.format,
                        items.state,
@@ -265,7 +268,7 @@ def create_app(
         form = parse_qs((await request.body()).decode(), keep_blank_values=True)
         url = form.get("url", [""])[0].strip()
         parts = urlsplit(url)
-        if parts.scheme not in {"http", "https"} or parts.hostname is None:
+        if not is_web_url(parts):
             response = home(
                 request,
                 capture="invalid",
@@ -290,8 +293,8 @@ def create_app(
     def item_detail(request: Request, item_id: int) -> HTMLResponse:
         with connect(database) as connection:
             item = connection.execute(
-                """
-                SELECT coalesce(title, canonical_url), coalesce(page_url, canonical_url), source,
+                f"""
+                SELECT {_DISPLAY_TITLE_SQL}, {_DISPLAY_URL_SQL}, source,
                        format, extracted_text_hash, chapters
                 FROM items
                 WHERE id = ?
@@ -371,8 +374,8 @@ def create_app(
     def item_long_form_summary(request: Request, item_id: int) -> HTMLResponse:
         with connect(database) as connection:
             item = connection.execute(
-                """
-                SELECT coalesce(title, canonical_url), coalesce(page_url, canonical_url), source,
+                f"""
+                SELECT {_DISPLAY_TITLE_SQL}, {_DISPLAY_URL_SQL}, source,
                        format, extracted_text_hash
                 FROM items
                 WHERE id = ?
@@ -442,8 +445,8 @@ def create_app(
             return token_error
         with connect(database) as connection:
             item = connection.execute(
-                """
-                SELECT coalesce(title, canonical_url), coalesce(page_url, canonical_url)
+                f"""
+                SELECT {_DISPLAY_TITLE_SQL}, {_DISPLAY_URL_SQL}
                 FROM items
                 WHERE id = ?
                 """,
@@ -471,8 +474,8 @@ def create_app(
             return token_error
         with connect(database) as connection:
             item = connection.execute(
-                """
-                SELECT coalesce(title, canonical_url), coalesce(page_url, canonical_url)
+                f"""
+                SELECT {_DISPLAY_TITLE_SQL}, {_DISPLAY_URL_SQL}
                 FROM items
                 WHERE id = ?
                 """,
