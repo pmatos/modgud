@@ -7,6 +7,7 @@ from typing import Any, cast
 
 from modgud.blobs import BlobStore
 from modgud.config import Settings
+from modgud.events import ItemLog
 from modgud.models import RoutedModelClient, create_model_client
 from modgud.transcripts import chunk_transcript
 from modgud.youtube import Chapter
@@ -181,15 +182,6 @@ def summarize_item(
     finally:
         routed.client.close()
     if summary is None:
-        failure_payload = json.dumps(
-            {
-                "attempts": 2,
-                "error": "model returned malformed summary output",
-                "stage": "summary",
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        )
         connection.execute(
             """
             UPDATE items
@@ -205,22 +197,13 @@ def summarize_item(
             """,
             (item_id,),
         )
-        connection.execute(
-            "INSERT INTO events (item_id, type, payload) VALUES (?, 'failed', ?)",
-            (item_id, failure_payload),
+        ItemLog(connection, item_id).failed(
+            error="model returned malformed summary output",
+            stage="summary",
+            attempts=2,
         )
         return None
     claims = json.dumps(list(summary.claims), ensure_ascii=False)
-    event_payload = json.dumps(
-        {
-            "claims": summary.claims,
-            "model": routed.model,
-            "one_liner": summary.one_liner,
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
     connection.execute(
         """
         INSERT INTO tier_1_summaries (item_id, one_liner, claims)
@@ -241,8 +224,9 @@ def summarize_item(
         """,
         (item_id,),
     )
-    connection.execute(
-        "INSERT INTO events (item_id, type, payload) VALUES (?, 'summarized', ?)",
-        (item_id, event_payload),
+    ItemLog(connection, item_id).summarized(
+        one_liner=summary.one_liner,
+        claims=summary.claims,
+        model=routed.model,
     )
     return summary

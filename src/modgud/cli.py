@@ -16,6 +16,7 @@ from modgud.blobs import BlobStore
 from modgud.config import ConfigError, Settings, default_config_path, get_settings
 from modgud.database import connect
 from modgud.delivery import PostmarkEmailClient, deliver_digest
+from modgud.events import ItemLog
 from modgud.extraction import (
     ExtractionError,
     NoTextLayerError,
@@ -27,7 +28,6 @@ from modgud.inbound import PostmarkClient, pending_inbound_captures, poll_inboun
 from modgud.origin_reports import render_origin_report
 from modgud.podcast_transcripts import run_podcast_transcript_batch
 from modgud.podcasts import (
-    PodcastEpisode,
     PodcastFeedError,
     discover_podcast_feed,
     parse_podcast_feed,
@@ -68,45 +68,6 @@ def _fetch(url: str) -> tuple[bytes, str | None, str | None]:
         return raw_input, None, f"{type(error).__name__}: {error}"
 
 
-def _record_capture(
-    connection: sqlite3.Connection,
-    *,
-    item_id: int,
-    url: str,
-    canonical_url: str,
-    origin: str | None,
-    inbound_message_id: str | None = None,
-    fetch_error: str | None = None,
-    podcast: PodcastEpisode | None = None,
-) -> None:
-    if podcast is not None and podcast.page_url is not None:
-        connection.execute(
-            "UPDATE items SET page_url = ? WHERE id = ? AND page_url IS NOT ?",
-            (podcast.page_url, item_id, podcast.page_url),
-        )
-    fields = {
-        "canonical_url": canonical_url,
-        "origin": origin,
-        "url": url,
-    }
-    if inbound_message_id is not None:
-        fields["inbound_message_id"] = inbound_message_id
-    if fetch_error is not None:
-        fields["fetch_error"] = fetch_error
-    if podcast is not None:
-        fields["feed_url"] = podcast.feed_url
-        fields["guid"] = podcast.guid
-    payload = json.dumps(
-        fields,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    connection.execute(
-        "INSERT INTO events (item_id, type, payload) VALUES (?, 'captured', ?)",
-        (item_id, payload),
-    )
-
-
 def _inbound_was_processed(
     connection: sqlite3.Connection,
     message_id: str,
@@ -143,30 +104,6 @@ def _mark_inbound_processed(
         raise RuntimeError(f"Inbound message was processed concurrently: {message_id}")
 
 
-def _record_extraction(
-    connection: sqlite3.Connection,
-    *,
-    item_id: int,
-    extracted_text_hash: str,
-    caption_language: str | None = None,
-    caption_kind: str | None = None,
-) -> None:
-    fields = {"extracted_text_hash": extracted_text_hash}
-    if caption_language is not None:
-        fields["caption_language"] = caption_language
-    if caption_kind is not None:
-        fields["caption_kind"] = caption_kind
-    payload = json.dumps(
-        fields,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    connection.execute(
-        "INSERT INTO events (item_id, type, payload) VALUES (?, 'extracted', ?)",
-        (item_id, payload),
-    )
-
-
 def _youtube_manifest(
     canonical_url: str,
     extracted: ExtractedYouTube,
@@ -183,64 +120,6 @@ def _youtube_manifest(
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
-
-
-def _record_extraction_failure(
-    connection: sqlite3.Connection,
-    *,
-    item_id: int,
-    error: str,
-    stage: str = "extraction",
-) -> None:
-    payload = json.dumps(
-        {"error": error, "stage": stage},
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    connection.execute(
-        "INSERT INTO events (item_id, type, payload) VALUES (?, 'failed', ?)",
-        (item_id, payload),
-    )
-
-
-def _record_caption_refusal(
-    connection: sqlite3.Connection,
-    *,
-    item_id: int,
-    reason: str,
-) -> None:
-    payload = json.dumps(
-        {"reason": reason, "stage": "captions"},
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    connection.execute(
-        """
-        INSERT INTO events (item_id, type, payload)
-        VALUES (?, 'caption_refused', ?)
-        """,
-        (item_id, payload),
-    )
-
-
-def _record_unsummarizable(
-    connection: sqlite3.Connection,
-    *,
-    item_id: int,
-    reason: str,
-) -> None:
-    payload = json.dumps(
-        {"reason": reason, "stage": "extraction"},
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    connection.execute(
-        """
-        INSERT INTO events (item_id, type, payload)
-        VALUES (?, 'unsummarizable', ?)
-        """,
-        (item_id, payload),
-    )
 
 
 def capture_url(
@@ -267,9 +146,7 @@ def capture_url(
         ).fetchone()
         if existing is not None:
             item_id = int(existing[0])
-            _record_capture(
-                connection,
-                item_id=item_id,
+            ItemLog(connection, item_id).captured(
                 url=url,
                 canonical_url=canonical_url,
                 origin=origin,
@@ -438,9 +315,16 @@ def capture_url(
         if existing is not None:
             item_id = int(existing[0])
             existing_url = str(existing[1])
-            _record_capture(
-                connection,
-                item_id=item_id,
+            if extracted_podcast is not None and extracted_podcast.page_url is not None:
+                connection.execute(
+                    "UPDATE items SET page_url = ? WHERE id = ? AND page_url IS NOT ?",
+                    (
+                        extracted_podcast.page_url,
+                        item_id,
+                        extracted_podcast.page_url,
+                    ),
+                )
+            ItemLog(connection, item_id).captured(
                 url=url,
                 canonical_url=canonical_url,
                 origin=origin,
@@ -492,9 +376,8 @@ def capture_url(
         inserted_item_id = cursor.lastrowid
         if inserted_item_id is None:
             raise RuntimeError("SQLite did not return an item id")
-        _record_capture(
-            connection,
-            item_id=inserted_item_id,
+        log = ItemLog(connection, inserted_item_id)
+        log.captured(
             url=url,
             canonical_url=canonical_url,
             origin=origin,
@@ -503,35 +386,20 @@ def capture_url(
             podcast=extracted_podcast,
         )
         if extracted_text_hash is not None:
-            _record_extraction(
-                connection,
-                item_id=inserted_item_id,
+            log.extracted(
                 extracted_text_hash=extracted_text_hash,
                 caption_language=caption_language,
                 caption_kind=caption_kind,
             )
         elif extraction_error is not None:
-            _record_extraction_failure(
-                connection,
-                item_id=inserted_item_id,
-                error=extraction_error,
-                stage=extraction_error_stage,
-            )
+            log.failed(error=extraction_error, stage=extraction_error_stage)
         elif unsummarizable_reason is not None:
-            _record_unsummarizable(
-                connection,
-                item_id=inserted_item_id,
-                reason=unsummarizable_reason,
-            )
+            log.unsummarizable(unsummarizable_reason)
         if (
             extracted_youtube is not None
             and extracted_youtube.caption_refusal is not None
         ):
-            _record_caption_refusal(
-                connection,
-                item_id=inserted_item_id,
-                reason=extracted_youtube.caption_refusal.reason,
-            )
+            log.caption_refused(extracted_youtube.caption_refusal.reason)
         if (
             extracted_text_hash is not None
             or extracted_youtube is not None
