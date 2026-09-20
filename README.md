@@ -49,9 +49,11 @@ re-extracted from the content stored at capture, without fetching it again:
 uv run modgud reprocess 42
 ```
 
-Items that already have extracted text, items of other formats, and items whose
-fetch failed are refused, since replacing the text would leave the item's
-summaries describing content it no longer carries.
+Items that already have extracted text are refused, since replacing the text
+would leave the item's summaries describing content it no longer carries. Items
+of other formats and items whose fetch failed are refused too: there is nothing
+here to extract. A successful reprocess leaves the item `extracted` and does not
+summarize it, so it is not digest-eligible until `modgud summarize` has run.
 
 Retrieve inbound email with the same one-shot command used by the systemd
 service:

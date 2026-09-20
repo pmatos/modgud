@@ -71,7 +71,7 @@ def reprocess_item(
     item_format, state, canonical_url, content_hash, extracted_text_hash = item
     if item_format not in _REPROCESSABLE_FORMATS:
         raise ReprocessError(
-            f"item {item_id} is a {item_format} item; "
+            f"item {item_id} has format {item_format}; "
             "only web and pdf items can be reprocessed"
         )
     if extracted_text_hash is not None:
@@ -94,13 +94,16 @@ def reprocess_item(
             f"item {item_id} was never fetched; its stored content is not the document"
         )
 
+    try:
+        content = blob_store.get(str(content_hash))
+    except (OSError, ValueError) as unreadable:
+        raise ReprocessError(
+            f"item {item_id}'s stored content cannot be read: {unreadable}"
+        ) from unreadable
+
     # Extract before taking the write lock: parsing a large PDF can outlast
     # SQLite's busy timeout for the web app's writers.
-    outcome = _extract(
-        ItemFormat(item_format),
-        blob_store.get(str(content_hash)),
-        url=str(canonical_url),
-    )
+    outcome = _extract(ItemFormat(item_format), content, url=str(canonical_url))
 
     match outcome:
         case _Text(text=text, title=title, author=author, site=site):
@@ -141,8 +144,7 @@ def _apply(
     site: str | None = None,
 ) -> None:
     """Move the item to its new state, unless something else already changed it."""
-    if not connection.in_transaction:
-        connection.execute("BEGIN IMMEDIATE")
+    connection.execute("BEGIN IMMEDIATE")
     updated = connection.execute(
         """
         UPDATE items

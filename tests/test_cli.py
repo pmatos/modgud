@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import re
@@ -20,6 +21,7 @@ from modgud.blobs import BlobStore
 from modgud.cli import main
 from modgud.database import connect
 from modgud.delivery import DigestEmail, PostmarkEmailClient
+from modgud.reprocess import ReprocessError, reprocess_item
 from modgud.youtube import (
     Caption,
     CaptionRefusal,
@@ -1664,6 +1666,71 @@ def test_reprocess_retries_a_web_page_whose_extraction_failed(
     assert event_types == ["captured", "extracted"]
 
 
+def test_reprocess_takes_the_source_from_the_extracted_site_name(
+    tmp_path: Path,
+) -> None:
+    html = _ARTICLE_HTML.replace(
+        b"<head>",
+        b'<head><meta property="og:site_name" content="Acme Blog">',
+    )
+    item_id = _store_item(tmp_path, content=html, item_format="web", state="failed")
+
+    result = run_modgud(tmp_path, "reprocess", str(item_id))
+
+    item, _ = _item_snapshot(tmp_path, item_id)
+    assert result.returncode == 0, result.stderr
+    assert item[5] == "Acme Blog"
+
+
+@pytest.mark.parametrize(
+    ("item_format", "content"),
+    [
+        pytest.param("web", b"<html><body></body></html>", id="empty-page"),
+        pytest.param("pdf", b"not a pdf", id="corrupt-pdf"),
+    ],
+)
+def test_reprocess_records_content_that_still_cannot_be_extracted_as_failed(
+    tmp_path: Path, item_format: str, content: bytes
+) -> None:
+    item_id = _store_item(
+        tmp_path, content=content, item_format=item_format, state="captured"
+    )
+
+    result = run_modgud(tmp_path, "reprocess", str(item_id))
+
+    item, event_types = _item_snapshot(tmp_path, item_id)
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        failure = json.loads(
+            connection.execute(
+                "SELECT payload FROM events WHERE type = 'failed'"
+            ).fetchone()[0]
+        )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"Reprocessed item {item_id}: failed\n"
+    assert (item[0], item[1]) == ("failed", None)
+    assert event_types == ["captured", "failed"]
+    assert failure["stage"] == "extraction"
+    assert failure["error"].startswith("ExtractionError: ")
+
+
+def test_reprocess_reports_stored_content_that_cannot_be_read(
+    tmp_path: Path,
+) -> None:
+    item_id = _store_item(
+        tmp_path, content=_ARTICLE_HTML, item_format="web", state="failed"
+    )
+    content_hash = hashlib.sha256(_ARTICLE_HTML).hexdigest()
+    (tmp_path / "blobs" / "sha256" / content_hash[:2] / content_hash).unlink()
+    before = _item_snapshot(tmp_path, item_id)
+
+    result = run_modgud(tmp_path, "reprocess", str(item_id))
+
+    assert result.returncode == 2
+    assert f"item {item_id}'s stored content cannot be read" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert _item_snapshot(tmp_path, item_id) == before
+
+
 _HAS_TEXT = b"Text that an earlier extraction already produced."
 
 
@@ -1746,8 +1813,6 @@ def test_reprocess_reports_an_unknown_item(tmp_path: Path) -> None:
 def test_reprocess_does_not_overwrite_an_item_that_changed_underneath_it(
     tmp_path: Path,
 ) -> None:
-    from modgud.reprocess import ReprocessError, reprocess_item
-
     database = tmp_path / "modgud.sqlite3"
     item_id = _store_item(
         tmp_path, content=_ARTICLE_HTML, item_format="web", state="failed"

@@ -43,7 +43,7 @@ Ten event types exist: `captured`, `extracted`, `failed`, `caption_refused`,
 The log is written through exactly one module, `modgud.events`, which owns the
 table, the type vocabulary, and the payload encoding. Nothing else in the
 package writes `INSERT INTO events`. Reading the log is deliberately *not* that
-module's job: every reader (`origin_reports`, `digests`, `web`, `cli`) queries
+module's job: every reader (`origin_reports`, `digests`, `web`, `cli`, `reprocess`) queries
 `events` joined to `items` with its own analytic SQL, and those queries share no
 shape worth abstracting.
 
