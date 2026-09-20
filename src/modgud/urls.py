@@ -1,6 +1,6 @@
 """Canonical identities for captured URLs."""
 
-from urllib.parse import unquote_plus, urlsplit, urlunsplit
+from urllib.parse import SplitResult, unquote_plus, urlsplit, urlunsplit
 
 _TRACKING_PARAMETERS = frozenset(
     {
@@ -15,6 +15,11 @@ _TRACKING_PARAMETERS = frozenset(
         "msclkid",
     }
 )
+
+
+def is_web_url(parts: SplitResult) -> bool:
+    """Return whether a parsed URL is a fetchable HTTP(S) address."""
+    return parts.scheme in {"http", "https"} and parts.hostname is not None
 
 
 def canonicalize_url(url: str) -> str:

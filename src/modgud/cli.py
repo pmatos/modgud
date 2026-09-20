@@ -79,6 +79,11 @@ def _record_capture(
     fetch_error: str | None = None,
     podcast: PodcastEpisode | None = None,
 ) -> None:
+    if podcast is not None and podcast.page_url is not None:
+        connection.execute(
+            "UPDATE items SET page_url = ? WHERE id = ? AND page_url IS NOT ?",
+            (podcast.page_url, item_id, podcast.page_url),
+        )
     fields = {
         "canonical_url": canonical_url,
         "origin": origin,
@@ -465,8 +470,9 @@ def capture_url(
                 author,
                 channel,
                 duration_seconds,
-                chapters
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                chapters,
+                page_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 canonical_url,
@@ -480,6 +486,7 @@ def capture_url(
                 channel,
                 duration_seconds,
                 chapters,
+                extracted_podcast.page_url if extracted_podcast is not None else None,
             ),
         )
         inserted_item_id = cursor.lastrowid

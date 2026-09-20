@@ -653,6 +653,7 @@ def test_episode_page_and_its_feed_resolve_to_the_same_episode(tmp_path: Path) -
               <guid isPermaLink="false">episode-page-guid</guid>
               <link>/episodes/queues</link>
               <title>Queues Are Coordination</title>
+              <enclosure url="/audio/queues.mp3" type="audio/mpeg" />
               <itunes:duration>42:10</itunes:duration>
             </item>
           </channel>
@@ -680,10 +681,11 @@ def test_episode_page_and_its_feed_resolve_to_the_same_episode(tmp_path: Path) -
                 "SELECT payload FROM events WHERE type = 'captured' ORDER BY id"
             )
         ]
-        canonical_url = connection.execute(
-            "SELECT canonical_url FROM items"
-        ).fetchone()[0]
+        canonical_url, page_url = connection.execute(
+            "SELECT canonical_url, page_url FROM items"
+        ).fetchone()
 
+    assert page_url == f"{server_url}/episodes/queues"
     assert from_episode.returncode == 0, from_episode.stderr
     assert from_feed.returncode == 0, from_feed.stderr
     assert from_episode.stdout == f"Added item 1: {canonical_url}\n"
@@ -708,6 +710,105 @@ def test_episode_page_and_its_feed_resolve_to_the_same_episode(tmp_path: Path) -
         },
     ]
     assert len(listed.stdout.splitlines()) == 2
+
+
+def _episode_feed(*, link: str | None) -> bytes:
+    link_element = f"<link>{link}</link>" if link is not None else ""
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <title>Systems from First Principles</title>
+            <item>
+              <guid isPermaLink="false">episode-guid</guid>
+              {link_element}
+              <title>Queues Are Coordination</title>
+              <enclosure url="/audio/queues.mp3" type="audio/mpeg" />
+            </item>
+          </channel>
+        </rss>
+    """.encode()
+
+
+def test_recapturing_a_feed_that_gained_a_link_backfills_the_page_url(
+    tmp_path: Path,
+) -> None:
+    routes = {"/feed.xml": (_episode_feed(link=None), "application/rss+xml")}
+    with serve_routes(routes) as (server_url, handler):
+        feed_url = f"{server_url}/feed.xml"
+        first = run_modgud(tmp_path, "add", feed_url)
+        with connect(tmp_path / "modgud.sqlite3") as connection:
+            page_url_after_first_capture = connection.execute(
+                "SELECT page_url FROM items"
+            ).fetchone()[0]
+
+        handler.routes["/feed.xml"] = (
+            _episode_feed(link="/episodes/queues"),
+            "application/rss+xml",
+        )
+        second = run_modgud(tmp_path, "add", feed_url)
+
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_count, page_url_after_second_capture = connection.execute(
+            "SELECT count(*), page_url FROM items"
+        ).fetchone()
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert page_url_after_first_capture is None
+    assert item_count == 1
+    assert page_url_after_second_capture == f"{server_url}/episodes/queues"
+
+
+def test_blog_post_listed_in_its_sites_feed_is_captured_as_a_web_page(
+    tmp_path: Path,
+) -> None:
+    page = b"""
+        <html>
+          <head>
+            <title>Shipping a Software Factory</title>
+            <link rel="alternate" type="application/rss+xml" href="/feed.xml">
+          </head>
+          <body>
+            <article>
+              <h1>Shipping a Software Factory</h1>
+              <p>We merged a thousand pull requests in a single week by letting
+              agents own the whole loop from ticket to merge, and this post
+              explains how the pipeline, the review gates, and the rollback
+              policy were designed to keep that pace safe.</p>
+              <p>The first lesson was that small, auditable changes matter more
+              than raw throughput, because every merged change has to remain
+              understandable to the humans who supervise the system.</p>
+            </article>
+          </body>
+        </html>
+    """
+    feed = b"""<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <title>Engineering Blog</title>
+            <item>
+              <guid isPermaLink="true">/blog/software-factory</guid>
+              <link>/blog/software-factory</link>
+              <title>Shipping a Software Factory</title>
+            </item>
+          </channel>
+        </rss>
+    """
+    routes = {
+        "/blog/software-factory": (page, "text/html; charset=utf-8"),
+        "/feed.xml": (feed, "application/rss+xml"),
+    }
+    with serve_routes(routes) as (server_url, _):
+        post_url = f"{server_url}/blog/software-factory"
+        result = run_modgud(tmp_path, "add", post_url)
+
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        items = connection.execute(
+            "SELECT canonical_url, format, title FROM items"
+        ).fetchall()
+
+    assert result.returncode == 0, result.stderr
+    assert items == [(post_url, "web", "Shipping a Software Factory")]
 
 
 def test_the_same_guid_in_two_feeds_has_two_feed_scoped_identities(

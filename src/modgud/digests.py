@@ -33,6 +33,12 @@ class DigestItem:
     summary: Tier1Summary | None
     span_map: SpanMap | None = None
     has_transcript: bool = False
+    page_url: str | None = None
+
+    @property
+    def link_url(self) -> str:
+        """The URL to show a human, preferring the page over the internal identity."""
+        return self.page_url or self.canonical_url
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,11 +143,11 @@ def render_digest(
             )
             text_line = (
                 f"{position}. {title} — {description} — {item.source} — "
-                f"{item.canonical_url} — 👍 Worth it: {worth_it_link} — "
+                f"{item.link_url} — 👍 Worth it: {worth_it_link} — "
                 f"👎 Not worth it: {not_worth_it_link}"
             )
             html_line = (
-                f'<li><a href="{escape(item.canonical_url, quote=True)}">'
+                f'<li><a href="{escape(item.link_url, quote=True)}">'
                 f"{escape(title)}</a> — {escape(description)} — "
                 f"{escape(item.source)}<br>"
                 f'<a href="{escape(worth_it_link, quote=True)}">👍 Worth it</a> · '
@@ -161,7 +167,7 @@ def render_digest(
         item_lines = [
             f"{position}. {title}",
             f"   {metadata}",
-            f"   {item.canonical_url}",
+            f"   {item.link_url}",
             f"   👍 Worth it: {worth_it_link}",
             f"   👎 Not worth it: {not_worth_it_link}",
         ]
@@ -184,7 +190,7 @@ def render_digest(
             [
                 "<article>",
                 (
-                    f'<h2>{position}. <a href="{escape(item.canonical_url, quote=True)}">'
+                    f'<h2>{position}. <a href="{escape(item.link_url, quote=True)}">'
                     f"{escape(title)}</a></h2>"
                 ),
                 f"<p>{escape(metadata)}</p>",
@@ -280,7 +286,8 @@ def select_digest_items(connection: sqlite3.Connection) -> tuple[DigestItem, ...
                items.time_to_value_seconds,
                tier_1_summaries.one_liner,
                tier_1_summaries.claims,
-               items.extracted_text_hash
+               items.extracted_text_hash,
+               items.page_url
         FROM qualifying_captures
         JOIN items ON items.id = qualifying_captures.item_id
         LEFT JOIN tier_1_summaries ON tier_1_summaries.item_id = items.id
@@ -309,6 +316,7 @@ def select_digest_items(connection: sqlite3.Connection) -> tuple[DigestItem, ...
                 has_transcript=(
                     item_format in TRANSCRIPT_FORMATS and row[10] is not None
                 ),
+                page_url=str(row[11]) if row[11] is not None else None,
             )
         )
     return tuple(items)

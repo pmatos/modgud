@@ -652,3 +652,54 @@ def test_successful_digest_boundary_discards_compact_overflow(
 
     assert "11. example.com — Capture only" in rendered.text
     assert select_digest_items(event_log) == ()
+
+
+def test_selection_reads_a_podcast_episodes_page_url(
+    event_log: sqlite3.Connection,
+) -> None:
+    cursor = event_log.execute(
+        """
+        INSERT INTO items (
+            canonical_url, content_hash, format, state, source, page_url
+        ) VALUES (
+            'podcast:abc123/episode-guid', 'content-0', 'podcast', 'failed',
+            'Systems Show', 'https://example.com/episodes/queues'
+        )
+        """
+    )
+    item_id = cursor.lastrowid
+    assert item_id is not None
+    event_log.execute(
+        "INSERT INTO events (item_id, type, payload) VALUES (?, 'captured', '{}')",
+        (item_id,),
+    )
+
+    (selected,) = select_digest_items(event_log)
+
+    assert selected.canonical_url == "podcast:abc123/episode-guid"
+    assert selected.page_url == "https://example.com/episodes/queues"
+    assert selected.link_url == "https://example.com/episodes/queues"
+
+
+def test_render_digest_links_a_podcast_episode_to_its_page_not_its_internal_identity() -> (
+    None
+):
+    item = DigestItem(
+        id=1,
+        canonical_url="podcast:abc123/episode-guid",
+        format=ItemFormat.PODCAST,
+        state="unsummarizable",
+        source="Systems Show",
+        title="Queues Are Coordination",
+        author=None,
+        time_to_value_seconds=None,
+        summary=None,
+        page_url="https://example.com/episodes/queues",
+    )
+
+    rendered = _render_digest((item,))
+
+    assert 'href="https://example.com/episodes/queues"' in rendered.html
+    assert "podcast:abc123" not in rendered.html
+    assert "https://example.com/episodes/queues" in rendered.text
+    assert "podcast:abc123" not in rendered.text
