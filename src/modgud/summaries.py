@@ -8,6 +8,7 @@ from typing import Any, cast
 from modgud.blobs import BlobStore
 from modgud.config import Settings
 from modgud.events import ItemLog
+from modgud.formats import DOCUMENT_FORMATS
 from modgud.models import RoutedModelClient, create_model_client
 from modgud.transcripts import chunk_transcript
 from modgud.youtube import Chapter
@@ -136,7 +137,7 @@ def summarize_item(
         raise ValueError(f"item {item_id} has no extracted text")
     extracted_content = blob_store.get(str(extracted_text_hash))
     source_texts: tuple[str, ...]
-    if item_format in ("web", "pdf"):
+    if item_format in DOCUMENT_FORMATS:
         source_texts = (extracted_content.decode("utf-8"),)
     elif item_format == "youtube":
         chapters: tuple[Chapter, ...] = ()

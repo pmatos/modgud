@@ -18,6 +18,16 @@ format, extract what text there is, and write the row. A capture that finds the
 item already stored is still a capture — it records that the URL was seen again
 rather than creating a second item.
 
+## Reprocess
+
+Re-running extraction for an existing item from the raw content stored at
+capture, with no fetch. It exists for items that ended a capture without text —
+a web page whose extraction failed, or a PDF captured before PDFs were
+extracted. It is refused for an item that already has extracted text, because
+that item's summaries are derived from it. The outcome is recorded with the
+ordinary `extracted`, `unsummarizable` and `failed` event types; there is no
+separate reprocess event.
+
 ## Event log
 
 The append-only record of everything that has happened to an item, stored in the
@@ -33,7 +43,7 @@ Ten event types exist: `captured`, `extracted`, `failed`, `caption_refused`,
 The log is written through exactly one module, `modgud.events`, which owns the
 table, the type vocabulary, and the payload encoding. Nothing else in the
 package writes `INSERT INTO events`. Reading the log is deliberately *not* that
-module's job: every reader (`origin_reports`, `digests`, `web`, `cli`) queries
+module's job: every reader (`origin_reports`, `digests`, `web`, `cli`, `reprocess`) queries
 `events` joined to `items` with its own analytic SQL, and those queries share no
 shape worth abstracting.
 

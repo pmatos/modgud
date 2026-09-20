@@ -32,6 +32,9 @@ class ItemFormat(StrEnum):
 # Formats whose extracted text is a timestamped transcript.
 TRANSCRIPT_FORMATS = frozenset({ItemFormat.YOUTUBE, ItemFormat.PODCAST})
 
+# Formats whose extracted text is parsed from the stored bytes of a document.
+DOCUMENT_FORMATS = frozenset({ItemFormat.WEB, ItemFormat.PDF})
+
 
 def detect_format(
     url: str,

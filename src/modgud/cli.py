@@ -32,6 +32,7 @@ from modgud.podcasts import (
     discover_podcast_feed,
     parse_podcast_feed,
 )
+from modgud.reprocess import ReprocessError, reprocess_item
 from modgud.span_maps import generate_span_map
 from modgud.summaries import summarize_item
 from modgud.time_to_value import recompute_time_to_value
@@ -471,6 +472,12 @@ def _summarize(data_dir: Path, item_id: int, settings: Settings) -> None:
         print(f"Summarized item {item_id}")
 
 
+def _reprocess(data_dir: Path, item_id: int) -> None:
+    with connect(data_dir / "modgud.sqlite3") as connection:
+        state = reprocess_item(connection, BlobStore(data_dir / "blobs"), item_id)
+    print(f"Reprocessed item {item_id}: {state}")
+
+
 def _span_map(data_dir: Path, item_id: int, settings: Settings) -> None:
     with connect(data_dir / "modgud.sqlite3") as connection:
         span_map = generate_span_map(
@@ -516,6 +523,11 @@ def main(*, local_now: datetime | None = None) -> None:
         help="generate or replace an item's tier-1 summary",
     )
     summarize_parser.add_argument("item_id", type=int)
+    reprocess_parser = subparsers.add_parser(
+        "reprocess",
+        help="re-run text extraction for a web or PDF item from its stored content",
+    )
+    reprocess_parser.add_argument("item_id", type=int)
     span_map_parser = subparsers.add_parser(
         "span-map",
         help="generate or replace an audio/video item's span map",
@@ -594,6 +606,11 @@ def main(*, local_now: datetime | None = None) -> None:
         _origin_report(data_dir)
     elif arguments.command == "summarize":
         _summarize(data_dir, arguments.item_id, settings)
+    elif arguments.command == "reprocess":
+        try:
+            _reprocess(data_dir, arguments.item_id)
+        except ReprocessError as error:
+            parser.error(str(error))
     elif arguments.command == "span-map":
         _span_map(data_dir, arguments.item_id, settings)
     elif arguments.command == "batch":
