@@ -5,15 +5,31 @@ Maintained by the `pm-deepen` skill. Statuses change; rows are never deleted.
 
 ## event-log-writer-seam
 
-- **Status**: proposed
+- **Status**: in-flight
 - **Score**: 23/25 (leverage 5, locality 5, blast radius 3, heat 5)
-- **Files**: ~9 estimated
+- **Files**: ~9 estimated, 8 actual
 - **Modules**: `src/modgud/events.py` (new), `src/modgud/cli.py`, `src/modgud/summaries.py`,
   `src/modgud/audio_fallbacks.py`, `src/modgud/podcast_transcripts.py`, `src/modgud/delivery.py`,
   `src/modgud/web.py`
 - **Summary**: Sixteen call sites in six modules hand-write the same payload encoding and
   `INSERT INTO events`; one writer module should own the append-only event log.
 - **First seen**: 2026-09-20
+- **PR**: #78
+
+### Run 2026-09-20 — complete
+
+- **Outcome**: complete
+- **Stopped at**: step 6 — PR opened
+- **Branch**: `sym/modgud/routine/refactor-audit/01M2ZCN81D`, adopted (non-default, no unique history, no
+  upstream, unpublished on origin). Not renamed, per the adopted-branch rule; the slug is recorded here
+  instead.
+- **Committed**: the review, this backlog, `src/modgud/events.py`, `tests/test_events.py`, the sixteen
+  converted call sites across six modules, and a new `CONTEXT.md`.
+- **Evidence**: quality gate green as four separate commands — `ruff check .`, `ruff format --check .`,
+  `mypy` (48 source files), `pytest` (314 passed). `grep -rn "INSERT INTO events" src/` returns only
+  `events.py`. Diff was 8 files against a scored estimate of 9.
+- **Next**: review PR #78. The runner-up candidate, `capture-extraction-outcome-record` (22/25, within one
+  point), is the natural next firing and is partly unblocked by this one.
 
 ## capture-extraction-outcome-record
 
