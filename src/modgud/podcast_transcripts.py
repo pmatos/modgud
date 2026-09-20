@@ -134,7 +134,7 @@ def run_podcast_transcript_batch(
         for item_id, content_hash, duration_seconds in pending:
             transcript = None
             transcript_source: TranscriptSource | None = None
-            transcript_url = ""
+            transcript_url: str | None = None
             transcript_media_type: str | None = None
             error_message = "episode has neither a usable transcript nor audio"
             try:
@@ -188,7 +188,11 @@ def run_podcast_transcript_batch(
                 else:
                     transcript_source = "audio"
                     transcript_url = resources.audio_url
-            if transcript is None or transcript_source is None:
+            if (
+                transcript is None
+                or transcript_source is None
+                or transcript_url is None
+            ):
                 _record_failure(database, int(item_id), error_message)
                 failed += 1
                 continue

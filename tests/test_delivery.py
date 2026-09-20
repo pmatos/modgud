@@ -276,6 +276,26 @@ def test_exhausted_send_retries_leave_no_event_and_preserve_the_selection(
     assert selected_ids == (item_id,)
 
 
+def test_a_scheduled_digest_records_its_local_date_on_the_sent_event(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    with connect(database) as connection:
+        _add_visible_item(connection, 1)
+    client = RecordingEmailClient()
+
+    _deliver_digest(database, client, scheduled_for=date(2026, 9, 3))
+
+    with connect(database) as connection:
+        payload = connection.execute(
+            "SELECT payload FROM events WHERE type = 'digest_sent'"
+        ).fetchone()[0]
+
+    # A plain date, not a datetime: the event log renders whatever it is handed,
+    # so the caller's type is what keeps this a bare local date.
+    assert json.loads(payload)["scheduled_for"] == "2026-09-03"
+
+
 def test_a_completed_scheduled_day_does_not_send_new_items_again(
     tmp_path: Path,
 ) -> None:

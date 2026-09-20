@@ -35,8 +35,9 @@ implementation.
   - *Locality 5* — today, changing how an event payload is encoded, or adding an event type, means editing a
     module and re-deriving the encoding from a neighbour. Afterwards it is a one-file edit in `events.py`.
   - *Blast radius 3* — several modules (6 source files, 1 new module, 1 new test, plus the call-site edits);
-    no published interface changes. The CLI stdout contract, the HTTP routes, and the stored payload bytes
-    are all preserved.
+    no published interface changes. The CLI stdout contract and the HTTP routes are untouched, and the
+    stored payload bytes are preserved at fifteen of the sixteen sites — see *Adjudication* for the one
+    exception and why it is safe.
   - *Heat 5* — every one of the six call-site modules appears in the last 60 commits; `cli.py` is the single
     hottest file in the repo.
 - **Problem**: the event log is the repo's central fact — `origin_reports.py:19-53` and `digests.py:260-271`
