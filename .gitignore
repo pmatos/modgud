@@ -10,3 +10,5 @@ __pycache__/
 *.db-wal
 *.db-shm
 data/
+
+.claude/settings.local.json
