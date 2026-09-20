@@ -8,10 +8,9 @@ from typing import Any, cast
 from modgud.blobs import BlobStore
 from modgud.config import Settings
 from modgud.events import ItemLog
-from modgud.formats import DOCUMENT_FORMATS
+from modgud.formats import DOCUMENT_FORMATS, TRANSCRIPT_FORMATS
 from modgud.models import RoutedModelClient, create_model_client
-from modgud.transcripts import chunk_transcript
-from modgud.youtube import Chapter
+from modgud.source_material import fetch_source_texts
 
 _SYSTEM_PROMPT = """You create compact decision aids for saved items.
 Return one JSON object with exactly these fields:
@@ -29,6 +28,10 @@ object with exactly these fields:
 Preserve the most substantive claims across the complete item, remove overlap,
 and do not mention chunks. Use only the supplied chunk summaries. Do not add
 markdown or commentary."""
+
+# Formats a tier-1 artifact can be generated from: every stored document and
+# every stored transcript.
+TIER_1_SUMMARY_FORMATS = DOCUMENT_FORMATS | TRANSCRIPT_FORMATS
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,32 +129,9 @@ def summarize_item(
     settings: Settings,
 ) -> Tier1Summary | None:
     """Generate and replace the current tier-1 artifact for one extracted item."""
-    item = connection.execute(
-        "SELECT format, extracted_text_hash, chapters FROM items WHERE id = ?",
-        (item_id,),
-    ).fetchone()
-    if item is None:
-        raise ValueError(f"item {item_id} does not exist")
-    item_format, extracted_text_hash, chapters_json = item
-    if extracted_text_hash is None:
-        raise ValueError(f"item {item_id} has no extracted text")
-    extracted_content = blob_store.get(str(extracted_text_hash))
-    source_texts: tuple[str, ...]
-    if item_format in DOCUMENT_FORMATS:
-        source_texts = (extracted_content.decode("utf-8"),)
-    elif item_format == "youtube":
-        chapters: tuple[Chapter, ...] = ()
-        if chapters_json is not None:
-            parsed_chapters = json.loads(str(chapters_json))
-            if not isinstance(parsed_chapters, list):
-                raise ValueError(f"item {item_id} has malformed chapters")
-            chapters = tuple(cast("list[Chapter]", parsed_chapters))
-        chunks = chunk_transcript(extracted_content, chapters=chapters)
-        if not chunks:
-            raise ValueError(f"item {item_id} has no transcript cues")
-        source_texts = tuple(chunk.text for chunk in chunks)
-    else:
-        raise ValueError(f"item {item_id} has no supported extracted text")
+    source_texts = fetch_source_texts(
+        connection, blob_store, item_id, accepted_formats=TIER_1_SUMMARY_FORMATS
+    )
 
     routed = create_model_client("tier_1_summary", settings=settings)
     summary = None
