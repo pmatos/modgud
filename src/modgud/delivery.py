@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 from modgud.config import SecretValue
 from modgud.database import connect
 from modgud.digests import render_digest, select_digest_items
+from modgud.events import ItemLog
 
 _POSTMARK_API_URL = "https://api.postmarkapp.com"
 _RETRY_DELAYS = (1.0, 2.0, 4.0)
@@ -172,25 +173,10 @@ def deliver_digest(
                 text_body=rendered.text,
             )
         )
-        payload = json.dumps(
-            {
-                "item_ids": item_ids,
-                "postmark_message_id": message_id,
-                **(
-                    {"scheduled_for": scheduled_for.isoformat()}
-                    if scheduled_for is not None
-                    else {}
-                ),
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        connection.execute(
-            """
-            INSERT INTO events (item_id, type, payload)
-            VALUES (?, 'digest_sent', ?)
-            """,
-            (item_ids[0], payload),
+        ItemLog(connection, item_ids[0]).digest_sent(
+            item_ids=item_ids,
+            postmark_message_id=message_id,
+            scheduled_for=scheduled_for,
         )
         if scheduled_for is not None:
             connection.execute(

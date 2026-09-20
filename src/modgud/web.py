@@ -1,6 +1,5 @@
 """Server-rendered web application for modgud."""
 
-import json
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -19,6 +18,7 @@ from modgud.blobs import BlobStore
 from modgud.cli import capture_url
 from modgud.config import Settings
 from modgud.database import connect
+from modgud.events import ItemLog
 from modgud.formats import TRANSCRIPT_FORMATS, ItemFormat
 from modgud.label_tokens import (
     ExpiredLabelToken,
@@ -483,10 +483,7 @@ def create_app(
             ).fetchone()
             if item is None:
                 return label_error(request, "Item not found")
-            connection.execute(
-                "INSERT INTO events (item_id, type, payload) VALUES (?, 'label', ?)",
-                (item_id, json.dumps({"label": label}, separators=(",", ":"))),
-            )
+            ItemLog(connection, item_id).label(label)
         return _TEMPLATES.TemplateResponse(
             request=request,
             name="label_recorded.html",

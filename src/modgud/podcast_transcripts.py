@@ -21,6 +21,7 @@ from openai import OpenAIError
 from modgud.blobs import BlobStore
 from modgud.config import Settings
 from modgud.database import connect
+from modgud.events import ItemLog, TranscriptSource
 from modgud.models import RoutedModelClient, create_model_client
 from modgud.podcasts import (
     PodcastFeedError,
@@ -132,7 +133,9 @@ def run_podcast_transcript_batch(
     try:
         for item_id, content_hash, duration_seconds in pending:
             transcript = None
-            path_fields: dict[str, str] | None = None
+            transcript_source: TranscriptSource | None = None
+            transcript_url: str | None = None
+            transcript_media_type: str | None = None
             error_message = "episode has neither a usable transcript nor audio"
             try:
                 resources = parse_podcast_episode_resources(
@@ -152,11 +155,9 @@ def run_podcast_transcript_batch(
                     except (HTTPException, OSError, PodcastTranscriptError) as error:
                         error_message = str(error)
                         continue
-                    path_fields = {
-                        "media_type": candidate.media_type,
-                        "source": "feed",
-                        "url": candidate.url,
-                    }
+                    transcript_source = "feed"
+                    transcript_url = candidate.url
+                    transcript_media_type = candidate.media_type
                     break
             if transcript is None and resources is not None and resources.audio_url:
                 try:
@@ -185,33 +186,18 @@ def run_podcast_transcript_batch(
                 ) as error:
                     error_message = str(error)
                 else:
-                    path_fields = {
-                        "source": "audio",
-                        "url": resources.audio_url,
-                    }
-            if transcript is None or path_fields is None:
+                    transcript_source = "audio"
+                    transcript_url = resources.audio_url
+            if (
+                transcript is None
+                or transcript_source is None
+                or transcript_url is None
+            ):
                 _record_failure(database, int(item_id), error_message)
                 failed += 1
                 continue
 
             transcript_hash = blob_store.put(transcript)
-            path_payload = json.dumps(
-                path_fields,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            extraction_payload = json.dumps(
-                {
-                    "extracted_text_hash": transcript_hash,
-                    "source": (
-                        "podcast_feed"
-                        if path_fields["source"] == "feed"
-                        else "audio_fallback"
-                    ),
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-            )
             with connect(database) as connection:
                 connection.execute(
                     """
@@ -223,21 +209,21 @@ def run_podcast_transcript_batch(
                     """,
                     (transcript_hash, item_id),
                 )
-                connection.execute(
-                    """
-                    INSERT INTO events (item_id, type, payload)
-                    VALUES (?, 'podcast_transcript', ?)
-                    """,
-                    (item_id, path_payload),
+                log = ItemLog(connection, int(item_id))
+                log.podcast_transcript(
+                    source=transcript_source,
+                    url=transcript_url,
+                    media_type=transcript_media_type,
                 )
-                connection.execute(
-                    """
-                    INSERT INTO events (item_id, type, payload)
-                    VALUES (?, 'extracted', ?)
-                    """,
-                    (item_id, extraction_payload),
+                log.extracted(
+                    extracted_text_hash=transcript_hash,
+                    source=(
+                        "podcast_feed"
+                        if transcript_source == "feed"
+                        else "audio_fallback"
+                    ),
                 )
-            if path_fields["source"] == "feed":
+            if transcript_source == "feed":
                 feed_supplied += 1
             else:
                 transcribed += 1
@@ -293,11 +279,6 @@ def _download_audio(url: str) -> Iterator[Path]:
 
 
 def _record_failure(database: str | Path, item_id: int, error: str) -> None:
-    failure_payload = json.dumps(
-        {"error": error, "stage": "podcast_transcript"},
-        separators=(",", ":"),
-        sort_keys=True,
-    )
     with connect(database) as connection:
         connection.execute(
             """
@@ -308,10 +289,7 @@ def _record_failure(database: str | Path, item_id: int, error: str) -> None:
             """,
             (item_id,),
         )
-        connection.execute(
-            "INSERT INTO events (item_id, type, payload) VALUES (?, 'failed', ?)",
-            (item_id, failure_payload),
-        )
+        ItemLog(connection, item_id).failed(error=error, stage="podcast_transcript")
 
 
 def _normalize_srt(content: bytes) -> bytes:

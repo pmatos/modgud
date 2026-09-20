@@ -1,6 +1,5 @@
 """Scheduled transcription fallback for refused YouTube captions."""
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +9,7 @@ from yt_dlp.utils import DownloadError
 from modgud.blobs import BlobStore
 from modgud.config import Settings
 from modgud.database import connect
+from modgud.events import ItemLog
 from modgud.models import create_model_client
 from modgud.youtube import download_youtube_audio
 
@@ -64,16 +64,6 @@ def run_audio_fallback_batch(
                         response_format="vtt",
                     )
             except (DownloadError, OpenAIError, OSError, ValueError) as error:
-                fallback_payload = json.dumps(
-                    {"outcome": "failed"},
-                    separators=(",", ":"),
-                    sort_keys=True,
-                )
-                failure_payload = json.dumps(
-                    {"error": str(error), "stage": "audio_fallback"},
-                    separators=(",", ":"),
-                    sort_keys=True,
-                )
                 with connect(database) as connection:
                     connection.execute(
                         """
@@ -84,37 +74,13 @@ def run_audio_fallback_batch(
                         """,
                         (item_id,),
                     )
-                    connection.execute(
-                        """
-                        INSERT INTO events (item_id, type, payload)
-                        VALUES (?, 'audio_fallback', ?)
-                        """,
-                        (item_id, fallback_payload),
-                    )
-                    connection.execute(
-                        """
-                        INSERT INTO events (item_id, type, payload)
-                        VALUES (?, 'failed', ?)
-                        """,
-                        (item_id, failure_payload),
-                    )
+                    log = ItemLog(connection, int(item_id))
+                    log.audio_fallback("failed")
+                    log.failed(error=str(error), stage="audio_fallback")
                 failed += 1
                 continue
             transcript_content = transcript.encode("utf-8")
             transcript_hash = blob_store.put(transcript_content)
-            fallback_payload = json.dumps(
-                {"outcome": "transcribed"},
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            extraction_payload = json.dumps(
-                {
-                    "extracted_text_hash": transcript_hash,
-                    "source": "audio_fallback",
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-            )
             with connect(database) as connection:
                 connection.execute(
                     """
@@ -126,19 +92,10 @@ def run_audio_fallback_batch(
                     """,
                     (transcript_hash, item_id),
                 )
-                connection.execute(
-                    """
-                    INSERT INTO events (item_id, type, payload)
-                    VALUES (?, 'audio_fallback', ?)
-                    """,
-                    (item_id, fallback_payload),
-                )
-                connection.execute(
-                    """
-                    INSERT INTO events (item_id, type, payload)
-                    VALUES (?, 'extracted', ?)
-                    """,
-                    (item_id, extraction_payload),
+                log = ItemLog(connection, int(item_id))
+                log.audio_fallback("transcribed")
+                log.extracted(
+                    extracted_text_hash=transcript_hash, source="audio_fallback"
                 )
             transcribed += 1
     finally:
