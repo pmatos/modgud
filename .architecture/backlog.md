@@ -5,7 +5,7 @@ Maintained by the `pm-deepen` skill. Statuses change; rows are never deleted.
 
 ## event-log-writer-seam
 
-- **Status**: in-flight
+- **Status**: landed
 - **Score**: 23/25 (leverage 5, locality 5, blast radius 3, heat 5)
 - **Files**: ~9 estimated, 8 actual
 - **Modules**: `src/modgud/events.py` (new), `src/modgud/cli.py`, `src/modgud/summaries.py`,
@@ -150,3 +150,25 @@ Maintained by the `pm-deepen` skill. Statuses change; rows are never deleted.
 - **Reason**: Blast radius 5, and it is a new feature rather than a deepening. Severity is bounded:
   `BlobStore.put` is content-addressed and idempotent, so the failure mode is wasted disk, never a dangling
   reference.
+
+## Run log
+
+### Run 2026-09-22 — bailed-preflight
+
+- **Outcome**: bailed-preflight
+- **Stopped at**: step 2 — an architecture PR is still open: #80 (`summary-source-text-seam`), one
+  PR at a time.
+- **Branch**: `sym/modgud/routine/refactor-audit/01M33370RK`, adopted (non-default, zero commits ahead
+  of `origin/main`, no upstream, unpublished on origin after the preflight fetch). Not renamed.
+- **Committed**: this backlog reconciliation and exit report; no code change and no review file.
+- **Evidence**: `gh pr view 78` reports MERGED at 2026-09-20T13:42:43Z, so `event-log-writer-seam`
+  moves `in-flight` to `landed`. `gh pr list --state open` reports PR #80, head
+  `sym/modgud/routine/refactor-audit/01M30GVV0W`, opened by the 2026-09-21 `pm-deepen` firing; that
+  branch's backlog carries `summary-source-text-seam` as `in-flight` with `PR: #80`. The entry is not on
+  `main` yet only because #80 has not merged; the in-flight rule applies to the open PR, not to where
+  its backlog row lives. #80's entries are deliberately not copied here, so they land with #80 and
+  keep their slugs. Quality gate discovered but not run, since nothing was implemented:
+  `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy`, `uv run pytest`.
+- **Next**: review and merge (or close) #80, then let the next firing run. #80's backlog ranks
+  `capture-extraction-outcome-record` and `capture-reprocess-extraction-dispatch-duplication` tied at
+  22/25 as the natural next pick.
