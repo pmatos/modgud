@@ -31,7 +31,7 @@ from modgud.long_form_summaries import (
     get_long_form_summary,
     request_long_form_summary,
 )
-from modgud.span_maps import load_transcript_chunks
+from modgud.source_material import load_transcript_chunks
 from modgud.summaries import get_tier_1_summary
 from modgud.transcripts import chunk_anchors, format_timestamp
 from modgud.urls import is_web_url

@@ -229,6 +229,67 @@ Reversible migrations limit operational risk.
     assert "00:00:01.000" not in messages
 
 
+def test_stored_podcast_transcript_gets_the_same_structured_summary(
+    tmp_path: Path,
+) -> None:
+    transcript = b"""WEBVTT
+
+00:00:01.000 --> 00:00:03.500
+Backpressure keeps a slow consumer from collapsing a queue.
+
+00:00:03.500 --> 00:00:06.000
+Bounded buffers make overload visible instead of silent.
+"""
+    expected = Tier1Summary(
+        one_liner="An episode on absorbing overload without losing work.",
+        claims=(
+            "Backpressure keeps a slow consumer from collapsing a queue.",
+            "Bounded buffers make overload visible instead of silent.",
+            "Overload is a design condition, not an exceptional one.",
+        ),
+    )
+    model_output = json.dumps(
+        {"one_liner": expected.one_liner, "claims": expected.claims}
+    )
+    blob_store = BlobStore(tmp_path / "blobs")
+    transcript_hash = blob_store.put(transcript)
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source, chapters
+            ) VALUES (?, ?, ?, 'podcast', 'extracted', 'Systems Podcast', '[]')
+            """,
+            (
+                "https://podcast.example.com/episodes/backpressure",
+                "e" * 64,
+                transcript_hash,
+            ),
+        )
+        item_id = cursor.lastrowid
+        assert item_id is not None
+
+        with serve_completions(model_output) as (endpoint, handler):
+            result = summarize_item(
+                connection,
+                blob_store,
+                item_id,
+                settings=settings_for_summary_endpoint(tmp_path, endpoint),
+            )
+
+        state = connection.execute(
+            "SELECT state FROM items WHERE id = ?", (item_id,)
+        ).fetchone()[0]
+
+    assert result == expected
+    assert state == "summarized"
+    assert len(handler.requests) == 1
+    messages = json.dumps(handler.requests[0]["messages"])
+    assert "Backpressure keeps a slow consumer from collapsing a queue." in messages
+    assert "00:00:01.000" not in messages
+
+
 def test_long_transcript_summarizes_every_chunk_then_combines(tmp_path: Path) -> None:
     first_text = "FIRST-SECTION " + "alpha evidence " * 260
     second_text = "SECOND-SECTION " + "omega evidence " * 260

@@ -8,7 +8,7 @@ from modgud.blobs import BlobStore
 from modgud.config import Settings
 from modgud.formats import TRANSCRIPT_FORMATS, ItemFormat
 from modgud.models import RoutedModelClient, create_model_client
-from modgud.span_maps import load_transcript_chunks
+from modgud.source_material import fetch_source_texts
 
 _SYSTEM_PROMPT = """You write full-length summaries of saved items for someone
 who wants the substance without reading the whole source. Write a thorough
@@ -29,30 +29,6 @@ class Tier2Summary:
     status: _SectionStatus
     summary_text: str | None
     error: str | None
-
-
-def _source_texts(
-    connection: sqlite3.Connection, blob_store: BlobStore, item_id: int
-) -> tuple[str, ...]:
-    item = connection.execute(
-        "SELECT format, extracted_text_hash, chapters FROM items WHERE id = ?",
-        (item_id,),
-    ).fetchone()
-    if item is None:
-        raise ValueError(f"item {item_id} does not exist")
-    item_format, extracted_text_hash, chapters_json = item
-    if extracted_text_hash is None:
-        raise ValueError(f"item {item_id} has no extracted text")
-    if item_format == ItemFormat.WEB:
-        return (blob_store.get(str(extracted_text_hash)).decode("utf-8"),)
-    if item_format in TRANSCRIPT_FORMATS:
-        chunks = load_transcript_chunks(
-            blob_store, str(extracted_text_hash), chapters_json, item_id=item_id
-        )
-        if not chunks:
-            raise ValueError(f"item {item_id} has no transcript cues")
-        return tuple(chunk.text for chunk in chunks)
-    raise ValueError(f"item {item_id} has no supported extracted text")
 
 
 def _request_section(routed: RoutedModelClient, source_text: str) -> str | None:
@@ -151,7 +127,9 @@ def generate_long_form_summary(
     order rather than condensed further, since the point of tier 2 is to
     preserve detail that tier 1 necessarily drops.
     """
-    source_texts = _source_texts(connection, blob_store, item_id)
+    source_texts = fetch_source_texts(
+        connection, blob_store, item_id, accepted_formats=LONG_FORM_SUMMARY_FORMATS
+    )
 
     routed = create_model_client("tier_2_summary", settings=settings)
     sections: list[str] = []

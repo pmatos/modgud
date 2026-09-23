@@ -69,6 +69,33 @@ than stored as `null`. The exception is a capture's `origin`, which is always
 written, including as `null`: the origin report distinguishes "captured with no
 known origin" from "origin not recorded" using `json_type`.
 
+## Source texts
+
+What an item's stored extracted text becomes when it is handed to a model. A
+document format yields exactly one source text — the stored blob decoded as
+UTF-8. A transcript format yields one per **transcript chunk**, in order. Every
+summarization-shaped feature consumes this same shape, which is why tier-1
+summaries, tier-2 long-form summaries and span maps can all be driven from one
+loop over source texts.
+
+Source texts are resolved through exactly one module, `modgud.source_material`,
+which owns the lookup of an item's format, extracted text and chapters, the
+document-versus-transcript decision, and the chunking. Nothing else in the
+package derives source texts from an item id. What the module deliberately does
+*not* own is **which formats each caller accepts**: that is the caller's policy,
+passed in, because tier 1 and tier 2 genuinely differ — tier 2 excludes PDFs and
+tier 1 does not.
+
+## Transcript chunk
+
+A slice of an item's transcript, carrying model-visible text and the exact
+timing that text came from. Timings are held by code and never asked of a
+model, so a span can't be hallucinated onto the wrong moment. There is one
+chunking mechanism in the system, not two: every reader of an item's transcript
+— span-map generation, tier-1 and tier-2 summarization, and the transcript page
+— goes through `modgud.source_material`, so their chunk boundaries cannot drift
+apart.
+
 ## Origin
 
 Where a capture came from — the inbound mail target, the web drop box, or the

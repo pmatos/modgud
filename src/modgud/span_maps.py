@@ -7,10 +7,9 @@ from typing import Any, cast
 
 from modgud.blobs import BlobStore
 from modgud.config import Settings
-from modgud.formats import TRANSCRIPT_FORMATS
 from modgud.models import create_model_client
-from modgud.transcripts import TranscriptChunk, chunk_transcript
-from modgud.youtube import Chapter
+from modgud.source_material import fetch_transcript_chunks
+from modgud.transcripts import TranscriptChunk
 
 _SYSTEM_PROMPT = """Select the transcript chunks worth engaging with.
 Return one JSON object with exactly one field, "chunks", containing an array of
@@ -68,35 +67,6 @@ def _parse_selections(content: str) -> tuple[tuple[str, str], ...]:
         selected_ids.add(normalized_id)
         selections.append((normalized_id, description.strip()))
     return tuple(selections)
-
-
-def parse_chapters(chapters_json: object, *, item_id: int) -> tuple[Chapter, ...]:
-    """Parse an item's stored chapters JSON into structured chapter markers."""
-    if chapters_json is None:
-        return ()
-    parsed = json.loads(str(chapters_json))
-    if not isinstance(parsed, list):
-        raise TypeError(f"item {item_id} has malformed chapters")
-    return tuple(cast("list[Chapter]", parsed))
-
-
-def load_transcript_chunks(
-    blob_store: BlobStore,
-    extracted_text_hash: str,
-    chapters_json: object,
-    *,
-    item_id: int,
-) -> tuple[TranscriptChunk, ...]:
-    """Load an item's stored transcript blob and split it into chunks.
-
-    Shared by every reader of an item's transcript (span-map generation, the
-    transcript page) so their chunk boundaries can never drift apart.
-    """
-    transcript = blob_store.get(extracted_text_hash)
-    return chunk_transcript(
-        transcript,
-        chapters=parse_chapters(chapters_json, item_id=item_id),
-    )
 
 
 def _resolve_spans(
@@ -192,22 +162,7 @@ def generate_span_map(
     settings: Settings,
 ) -> SpanMap | None:
     """Generate and replace the structured span map for one AV item."""
-    item = connection.execute(
-        "SELECT format, extracted_text_hash, chapters FROM items WHERE id = ?",
-        (item_id,),
-    ).fetchone()
-    if item is None:
-        raise ValueError(f"item {item_id} does not exist")
-    item_format, extracted_text_hash, chapters_json = item
-    if item_format not in TRANSCRIPT_FORMATS:
-        raise ValueError(f"item {item_id} has no supported transcript")
-    if extracted_text_hash is None:
-        raise ValueError(f"item {item_id} has no extracted text")
-    chunks = load_transcript_chunks(
-        blob_store, str(extracted_text_hash), chapters_json, item_id=item_id
-    )
-    if not chunks:
-        raise ValueError(f"item {item_id} has no transcript cues")
+    chunks = fetch_transcript_chunks(connection, blob_store, item_id)
 
     model_input = json.dumps(
         {"chunks": [{"id": chunk.id, "text": chunk.text} for chunk in chunks]},
