@@ -10,6 +10,7 @@ from modgud.blobs import BlobStore
 from modgud.config import Settings
 from modgud.database import connect
 from modgud.events import ItemLog
+from modgud.item_lifecycle import mark_extracted, mark_failed
 from modgud.models import create_model_client
 from modgud.youtube import download_youtube_audio
 
@@ -65,37 +66,24 @@ def run_audio_fallback_batch(
                     )
             except (DownloadError, OpenAIError, OSError, ValueError) as error:
                 with connect(database) as connection:
-                    connection.execute(
-                        """
-                        UPDATE items
-                        SET state = 'failed',
-                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                        WHERE id = ?
-                        """,
-                        (item_id,),
+                    ItemLog(connection, int(item_id)).audio_fallback("failed")
+                    mark_failed(
+                        connection,
+                        int(item_id),
+                        error=str(error),
+                        stage="audio_fallback",
                     )
-                    log = ItemLog(connection, int(item_id))
-                    log.audio_fallback("failed")
-                    log.failed(error=str(error), stage="audio_fallback")
                 failed += 1
                 continue
             transcript_content = transcript.encode("utf-8")
             transcript_hash = blob_store.put(transcript_content)
             with connect(database) as connection:
-                connection.execute(
-                    """
-                    UPDATE items
-                    SET extracted_text_hash = ?,
-                        state = 'extracted',
-                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                    WHERE id = ?
-                    """,
-                    (transcript_hash, item_id),
-                )
-                log = ItemLog(connection, int(item_id))
-                log.audio_fallback("transcribed")
-                log.extracted(
-                    extracted_text_hash=transcript_hash, source="audio_fallback"
+                ItemLog(connection, int(item_id)).audio_fallback("transcribed")
+                mark_extracted(
+                    connection,
+                    int(item_id),
+                    extracted_text_hash=transcript_hash,
+                    event_source="audio_fallback",
                 )
             transcribed += 1
     finally:
