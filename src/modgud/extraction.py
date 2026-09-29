@@ -2,11 +2,14 @@
 
 from dataclasses import dataclass
 from io import BytesIO
+from typing import Protocol
 from urllib.parse import urlsplit
 
 from pypdf import PdfReader
 from trafilatura import bare_extraction
 from trafilatura.settings import Document
+
+from modgud.formats import ItemFormat
 
 _BOILERPLATE_XPATH = (
     "//nav | //footer | //aside | "
@@ -27,9 +30,9 @@ class NoTextLayerError(ExtractionError):
     """Raised when a PDF parses cleanly but carries no extractable text."""
 
 
-@dataclass(frozen=True)
-class ExtractedPage:
-    """Readable content and descriptive metadata from one web page."""
+@dataclass(frozen=True, slots=True)
+class ExtractedDocument:
+    """Readable text and normalized metadata from one document."""
 
     text: str
     title: str | None
@@ -37,8 +40,16 @@ class ExtractedPage:
     site: str | None
 
 
-def extract_web_page(content: bytes, *, url: str) -> ExtractedPage:
-    """Extract a page's main text and metadata, excluding page boilerplate."""
+class _DocumentFormatAdapter(Protocol):
+    def __call__(
+        self,
+        content: bytes,
+        *,
+        url: str,
+    ) -> ExtractedDocument: ...
+
+
+def _extract_web_document(content: bytes, *, url: str) -> ExtractedDocument:
     try:
         document = bare_extraction(
             content,
@@ -62,7 +73,7 @@ def extract_web_page(content: bytes, *, url: str) -> ExtractedPage:
     if site in {document.hostname, urlsplit(url).netloc}:
         site = None
 
-    return ExtractedPage(
+    return ExtractedDocument(
         text=text,
         title=document.title or None,
         author=document.author or None,
@@ -70,23 +81,8 @@ def extract_web_page(content: bytes, *, url: str) -> ExtractedPage:
     )
 
 
-@dataclass(frozen=True)
-class ExtractedPdf:
-    """Readable text and descriptive metadata from one PDF document."""
-
-    text: str
-    title: str | None
-    author: str | None
-
-
-def extract_pdf(content: bytes) -> ExtractedPdf:
-    """Extract a PDF's text and metadata, page by page.
-
-    Raises ``NoTextLayerError`` for a PDF that parses cleanly but has no
-    extractable text (for example, a scanned or image-only PDF), so callers
-    can treat that case as an expected, non-erroring outcome distinct from a
-    malformed file.
-    """
+def _extract_pdf_document(content: bytes, *, url: str) -> ExtractedDocument:
+    """Extract a PDF's text and metadata, page by page."""
     try:
         reader = PdfReader(BytesIO(content))
         page_texts = [page.extract_text() for page in reader.pages]
@@ -102,4 +98,29 @@ def extract_pdf(content: bytes) -> ExtractedPdf:
 
     title = metadata.title if metadata is not None else None
     author = metadata.author if metadata is not None else None
-    return ExtractedPdf(text=text, title=title or None, author=author or None)
+    return ExtractedDocument(
+        text=text,
+        title=title or None,
+        author=author or None,
+        site=None,
+    )
+
+
+_DOCUMENT_FORMAT_ADAPTERS: dict[ItemFormat, _DocumentFormatAdapter] = {
+    ItemFormat.WEB: _extract_web_document,
+    ItemFormat.PDF: _extract_pdf_document,
+}
+
+
+def extract_document(
+    content: bytes,
+    *,
+    item_format: ItemFormat,
+    url: str,
+) -> ExtractedDocument:
+    """Extract readable text and metadata using the document's format."""
+    try:
+        adapter = _DOCUMENT_FORMAT_ADAPTERS[item_format]
+    except KeyError:
+        raise ValueError(f"unsupported document format: {item_format}") from None
+    return adapter(content, url=url)

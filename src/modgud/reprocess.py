@@ -6,11 +6,9 @@ from contextlib import contextmanager
 
 from modgud.blobs import BlobStore
 from modgud.extraction import (
-    ExtractedPage,
     ExtractionError,
     NoTextLayerError,
-    extract_pdf,
-    extract_web_page,
+    extract_document,
 )
 from modgud.formats import DOCUMENT_FORMATS, ItemFormat
 from modgud.item_lifecycle import (
@@ -96,7 +94,11 @@ def reprocess_item(
     # Extract before taking the write lock: parsing a large PDF can outlast
     # SQLite's busy timeout for the web app's writers.
     try:
-        page = _extract(item_format, content, url=str(canonical_url))
+        page = extract_document(
+            content,
+            item_format=ItemFormat(item_format),
+            url=str(canonical_url),
+        )
     except NoTextLayerError as error:
         with _locked_transition(connection, item_id):
             mark_unsummarizable(
@@ -130,15 +132,6 @@ def reprocess_item(
         )
     recompute_time_to_value(connection, item_id=item_id, extracted_text=page.text)
     return "extracted"
-
-
-def _extract(item_format: str, content: bytes, *, url: str) -> ExtractedPage:
-    if item_format == ItemFormat.PDF:
-        pdf = extract_pdf(content)
-        return ExtractedPage(
-            text=pdf.text, title=pdf.title, author=pdf.author, site=None
-        )
-    return extract_web_page(content, url=url)
 
 
 def _describe(error: ExtractionError) -> str:

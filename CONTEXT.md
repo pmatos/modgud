@@ -29,6 +29,13 @@ format, extract what text there is, and write the row. A capture that finds the
 item already stored is still a capture — it records that the URL was seen again
 rather than creating a second item.
 
+## Document extraction
+
+Converting fetched or stored web/PDF bytes into normalized readable text and
+metadata. `modgud.extraction` owns format dispatch and dependency-specific
+normalization behind one interface. Capture and Reprocess retain their distinct
+Item persistence and lifecycle outcome policy.
+
 ## Reprocess
 
 Re-running extraction for an existing item from the raw content stored at

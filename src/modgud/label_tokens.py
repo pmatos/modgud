@@ -21,9 +21,13 @@ class ExpiredLabelToken(InvalidLabelToken):
 def _decode(value: str) -> bytes:
     padding = "=" * (-len(value) % 4)
     try:
-        return base64.b64decode(value + padding, altchars=b"-_", validate=True)
+        decoded = base64.b64decode(value + padding, altchars=b"-_", validate=True)
     except (ValueError, UnicodeEncodeError) as error:
         raise InvalidLabelToken("malformed token") from error
+    canonical = base64.urlsafe_b64encode(decoded).rstrip(b"=").decode()
+    if not hmac.compare_digest(value, canonical):
+        raise InvalidLabelToken("malformed token")
+    return decoded
 
 
 def create_label_token(

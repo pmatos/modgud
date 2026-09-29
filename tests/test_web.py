@@ -477,7 +477,10 @@ def test_a_modified_digest_token_cannot_record_a_label(
         settings=settings,
         now=datetime.now(UTC),
     )
-    replacement = "A" if signed_target[-1] != "A" else "B"
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    last_index = alphabet.index(signed_target[-1])
+    assert last_index % 4 == 0
+    replacement = alphabet[last_index + 1]
     modified_target = f"{signed_target[:-1]}{replacement}"
 
     with TestClient(create_app(tmp_path, settings=settings)) as client:
