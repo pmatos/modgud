@@ -22,6 +22,7 @@ from modgud.blobs import BlobStore
 from modgud.config import Settings
 from modgud.database import connect
 from modgud.events import ItemLog, TranscriptSource
+from modgud.item_lifecycle import mark_extracted, mark_failed
 from modgud.models import RoutedModelClient, create_model_client
 from modgud.podcasts import (
     PodcastFeedError,
@@ -199,25 +200,16 @@ def run_podcast_transcript_batch(
 
             transcript_hash = blob_store.put(transcript)
             with connect(database) as connection:
-                connection.execute(
-                    """
-                    UPDATE items
-                    SET extracted_text_hash = ?,
-                        state = 'extracted',
-                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                    WHERE id = ?
-                    """,
-                    (transcript_hash, item_id),
-                )
-                log = ItemLog(connection, int(item_id))
-                log.podcast_transcript(
+                ItemLog(connection, int(item_id)).podcast_transcript(
                     source=transcript_source,
                     url=transcript_url,
                     media_type=transcript_media_type,
                 )
-                log.extracted(
+                mark_extracted(
+                    connection,
+                    int(item_id),
                     extracted_text_hash=transcript_hash,
-                    source=(
+                    event_source=(
                         "podcast_feed"
                         if transcript_source == "feed"
                         else "audio_fallback"
@@ -280,16 +272,12 @@ def _download_audio(url: str) -> Iterator[Path]:
 
 def _record_failure(database: str | Path, item_id: int, error: str) -> None:
     with connect(database) as connection:
-        connection.execute(
-            """
-            UPDATE items
-            SET state = 'failed',
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-            WHERE id = ?
-            """,
-            (item_id,),
+        mark_failed(
+            connection,
+            item_id,
+            error=error,
+            stage="podcast_transcript",
         )
-        ItemLog(connection, item_id).failed(error=error, stage="podcast_transcript")
 
 
 def _normalize_srt(content: bytes) -> bytes:

@@ -1,9 +1,10 @@
 """Re-run text extraction for an item from the raw content it was captured with."""
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from modgud.blobs import BlobStore
-from modgud.events import ItemLog
 from modgud.extraction import (
     ExtractedPage,
     ExtractionError,
@@ -12,11 +13,28 @@ from modgud.extraction import (
     extract_web_page,
 )
 from modgud.formats import DOCUMENT_FORMATS, ItemFormat
+from modgud.item_lifecycle import (
+    ItemTransitionConflict,
+    mark_extracted,
+    mark_failed,
+    mark_unsummarizable,
+)
 from modgud.time_to_value import recompute_time_to_value
 
 
 class ReprocessError(ValueError):
     """Raised when an item cannot be reprocessed."""
+
+
+@contextmanager
+def _locked_transition(connection: sqlite3.Connection, item_id: int) -> Iterator[None]:
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except ItemTransitionConflict as conflict:
+        raise ReprocessError(
+            f"item {item_id} changed while it was being reprocessed"
+        ) from conflict
 
 
 def reprocess_item(
@@ -80,64 +98,38 @@ def reprocess_item(
     try:
         page = _extract(item_format, content, url=str(canonical_url))
     except NoTextLayerError as error:
-        _apply(connection, item_id, from_state=state, to_state="unsummarizable")
-        ItemLog(connection, item_id).unsummarizable(_describe(error))
+        with _locked_transition(connection, item_id):
+            mark_unsummarizable(
+                connection,
+                item_id,
+                reason=_describe(error),
+                expected_state=state,
+            )
         return "unsummarizable"
     except ExtractionError as error:
-        _apply(connection, item_id, from_state=state, to_state="failed")
-        ItemLog(connection, item_id).failed(error=_describe(error), stage="extraction")
+        with _locked_transition(connection, item_id):
+            mark_failed(
+                connection,
+                item_id,
+                error=_describe(error),
+                stage="extraction",
+                expected_state=state,
+            )
         return "failed"
 
     text_hash = blob_store.put(page.text.encode("utf-8"))
-    _apply(
-        connection,
-        item_id,
-        from_state=state,
-        to_state="extracted",
-        text_hash=text_hash,
-        page=page,
-    )
-    ItemLog(connection, item_id).extracted(extracted_text_hash=text_hash)
+    with _locked_transition(connection, item_id):
+        mark_extracted(
+            connection,
+            item_id,
+            extracted_text_hash=text_hash,
+            expected_state=state,
+            title=page.title,
+            author=page.author,
+            item_source=page.site,
+        )
     recompute_time_to_value(connection, item_id=item_id, extracted_text=page.text)
     return "extracted"
-
-
-def _apply(
-    connection: sqlite3.Connection,
-    item_id: int,
-    *,
-    from_state: str,
-    to_state: str,
-    text_hash: str | None = None,
-    page: ExtractedPage | None = None,
-) -> None:
-    """Move the item to its new state, unless something else already changed it."""
-    connection.execute("BEGIN IMMEDIATE")
-    updated = connection.execute(
-        """
-        UPDATE items
-        SET state = ?,
-            extracted_text_hash = ?,
-            title = coalesce(?, title),
-            author = coalesce(?, author),
-            source = coalesce(?, source),
-            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-        WHERE id = ?
-          AND state = ?
-          AND extracted_text_hash IS NULL
-        """,
-        (
-            to_state,
-            text_hash,
-            page.title if page else None,
-            page.author if page else None,
-            page.site if page else None,
-            item_id,
-            from_state,
-        ),
-    )
-    if updated.rowcount != 1:
-        raise ReprocessError(f"item {item_id} changed while it was being reprocessed")
 
 
 def _extract(item_format: str, content: bytes, *, url: str) -> ExtractedPage:

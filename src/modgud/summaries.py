@@ -7,8 +7,8 @@ from typing import Any, cast
 
 from modgud.blobs import BlobStore
 from modgud.config import Settings
-from modgud.events import ItemLog
 from modgud.formats import DOCUMENT_FORMATS, TRANSCRIPT_FORMATS
+from modgud.item_lifecycle import mark_summarized, mark_summary_failed
 from modgud.models import RoutedModelClient, create_model_client
 from modgud.source_material import fetch_source_texts
 
@@ -163,49 +163,16 @@ def summarize_item(
     finally:
         routed.client.close()
     if summary is None:
-        connection.execute(
-            """
-            UPDATE items
-            SET state = CASE
-                    WHEN EXISTS (
-                        SELECT 1 FROM tier_1_summaries
-                        WHERE tier_1_summaries.item_id = items.id
-                    ) THEN 'summarized'
-                    ELSE 'failed'
-                END,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-            WHERE id = ?
-            """,
-            (item_id,),
-        )
-        ItemLog(connection, item_id).failed(
+        mark_summary_failed(
+            connection,
+            item_id,
             error="model returned malformed summary output",
-            stage="summary",
             attempts=2,
         )
         return None
-    claims = json.dumps(list(summary.claims), ensure_ascii=False)
-    connection.execute(
-        """
-        INSERT INTO tier_1_summaries (item_id, one_liner, claims)
-        VALUES (?, ?, ?)
-        ON CONFLICT (item_id) DO UPDATE SET
-            one_liner = excluded.one_liner,
-            claims = excluded.claims,
-            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-        """,
-        (item_id, summary.one_liner, claims),
-    )
-    connection.execute(
-        """
-        UPDATE items
-        SET state = 'summarized',
-            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-        WHERE id = ?
-        """,
-        (item_id,),
-    )
-    ItemLog(connection, item_id).summarized(
+    mark_summarized(
+        connection,
+        item_id,
         one_liner=summary.one_liner,
         claims=summary.claims,
         model=routed.model,

@@ -11,6 +11,17 @@ podcast episode. Identified by its canonical URL, stored once, and carrying
 exactly one **state** at a time (`captured`, `extracted`, `summarized`,
 `unsummarizable`, `failed`; see *Item lifecycle* in `DESIGN.md`).
 
+## Item lifecycle
+
+The state change for an existing item and the event that explains it are one
+transactional operation. They run through `modgud.item_lifecycle`, which owns
+the item write for `extracted`, `failed`, `unsummarizable`, and `summarized`
+outcomes, owns the tier-1 artifact write for `summarized`, then delegates the
+matching event to `ItemLog` on the same caller-owned connection.
+Source-specific provenance events may precede that lifecycle event in the same
+transaction. Initial capture remains separate: it creates the item rather than
+transitioning an existing one.
+
 ## Capture
 
 One run of taking a URL to a stored item: canonicalize, fetch, detect the
