@@ -9,9 +9,9 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from modgud.extraction import (
     ExtractionError,
     NoTextLayerError,
-    extract_pdf,
-    extract_web_page,
+    extract_document,
 )
+from modgud.formats import ItemFormat
 
 
 def _pdf_bytes(
@@ -180,7 +180,11 @@ def test_extracts_readable_posts_without_page_boilerplate(
     article_text: str,
     boilerplate: str,
 ) -> None:
-    page = extract_web_page(html.encode(), url=url)
+    page = extract_document(
+        html.encode(),
+        item_format=ItemFormat.WEB,
+        url=url,
+    )
 
     assert (page.title, page.author, page.site) == (title, author, site)
     assert article_text in " ".join(page.text.split())
@@ -191,7 +195,11 @@ def test_empty_page_is_an_extraction_failure() -> None:
     html = b"<html><head><title>Empty</title></head><body></body></html>"
 
     with pytest.raises(ExtractionError, match="readable text"):
-        extract_web_page(html, url="https://example.com/empty")
+        extract_document(
+            html,
+            item_format=ItemFormat.WEB,
+            url="https://example.com/empty",
+        )
 
 
 def test_related_post_cards_are_not_part_of_readable_text() -> None:
@@ -232,7 +240,11 @@ def test_related_post_cards_are_not_part_of_readable_text() -> None:
         </html>
     """
 
-    page = extract_web_page(html, url="https://example.com/small-service")
+    page = extract_document(
+        html,
+        item_format=ItemFormat.WEB,
+        url="https://example.com/small-service",
+    )
 
     assert "A small service still needs an explicit recovery model" in page.text
     assert "The cost of saying yes has changed" not in page.text
@@ -245,7 +257,11 @@ def test_extracts_pdf_text_and_metadata() -> None:
         author="Ada Rivera",
     )
 
-    pdf = extract_pdf(content)
+    pdf = extract_document(
+        content,
+        item_format=ItemFormat.PDF,
+        url="https://example.com/test.pdf",
+    )
 
     assert "Hello modgud PDF extraction" in pdf.text
     assert (pdf.title, pdf.author) == ("A Test PDF", "Ada Rivera")
@@ -255,12 +271,20 @@ def test_pdf_with_no_text_layer_raises_no_text_layer_error() -> None:
     content = _pdf_bytes(None)
 
     with pytest.raises(NoTextLayerError, match="no extractable text"):
-        extract_pdf(content)
+        extract_document(
+            content,
+            item_format=ItemFormat.PDF,
+            url="https://example.com/textless.pdf",
+        )
 
 
 def test_corrupt_pdf_is_an_extraction_failure_not_a_missing_text_layer() -> None:
     content = b"%PDF-1.7\nnot actually a well-formed PDF"
 
     with pytest.raises(ExtractionError, match="pdf extraction failed") as excinfo:
-        extract_pdf(content)
+        extract_document(
+            content,
+            item_format=ItemFormat.PDF,
+            url="https://example.com/corrupt.pdf",
+        )
     assert excinfo.type is ExtractionError

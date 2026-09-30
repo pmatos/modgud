@@ -20,10 +20,9 @@ from modgud.events import ItemLog
 from modgud.extraction import (
     ExtractionError,
     NoTextLayerError,
-    extract_pdf,
-    extract_web_page,
+    extract_document,
 )
-from modgud.formats import ItemFormat, detect_format
+from modgud.formats import DOCUMENT_FORMATS, ItemFormat, detect_format
 from modgud.inbound import PostmarkClient, pending_inbound_captures, poll_inbound
 from modgud.origin_reports import render_origin_report
 from modgud.podcast_transcripts import run_podcast_transcript_batch
@@ -249,29 +248,23 @@ def capture_url(
         author = extracted_podcast.author
         channel = extracted_podcast.podcast_title
         duration_seconds = extracted_podcast.duration_seconds
-    elif fetch_error is None and item_format is ItemFormat.WEB:
+    elif fetch_error is None and item_format in DOCUMENT_FORMATS:
         try:
-            extracted_page = extract_web_page(content, url=canonical_url)
-        except ExtractionError as error:
-            extraction_error = f"{type(error).__name__}: {error}"
-        else:
-            extracted_text = extracted_page.text
-            extracted_text_hash = blob_store.put(extracted_text.encode("utf-8"))
-            title = extracted_page.title
-            author = extracted_page.author
-            extracted_site = extracted_page.site
-    elif fetch_error is None and item_format is ItemFormat.PDF:
-        try:
-            extracted_pdf = extract_pdf(content)
+            extracted_document = extract_document(
+                content,
+                item_format=item_format,
+                url=canonical_url,
+            )
         except NoTextLayerError as error:
             unsummarizable_reason = f"{type(error).__name__}: {error}"
         except ExtractionError as error:
             extraction_error = f"{type(error).__name__}: {error}"
         else:
-            extracted_text = extracted_pdf.text
+            extracted_text = extracted_document.text
             extracted_text_hash = blob_store.put(extracted_text.encode("utf-8"))
-            title = extracted_pdf.title
-            author = extracted_pdf.author
+            title = extracted_document.title
+            author = extracted_document.author
+            extracted_site = extracted_document.site
 
     if fetch_error is not None:
         item_state = "failed"
