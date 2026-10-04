@@ -15,7 +15,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
 from modgud.blobs import BlobStore
-from modgud.cli import capture_url
+from modgud.capture import capture_url
 from modgud.config import Settings
 from modgud.database import connect
 from modgud.events import ItemLog

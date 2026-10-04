@@ -29,6 +29,14 @@ format, extract what text there is, and write the row. A capture that finds the
 item already stored is still a capture — it records that the URL was seen again
 rather than creating a second item.
 
+`modgud.capture` owns this operation across the CLI, web, and inbound inlets:
+canonical identity, source acquisition, extraction, Item persistence, capture
+events, time-to-value, and immediate web summarization. Its interface returns
+the stored Item identity and whether it was created, but performs no
+presentation. Each inlet retains its own validation and presentation policy.
+An inbound message already marked processed is ignored without recording
+another capture.
+
 ## Document extraction
 
 Converting fetched or stored web/PDF bytes into normalized readable text and

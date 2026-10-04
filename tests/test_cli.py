@@ -1109,7 +1109,9 @@ The supporting evidence.
         chapters=chapters,
         caption=Caption(language="en", kind="manual", content=captions),
     )
-    monkeypatch.setattr("modgud.cli.extract_youtube", lambda captured_url: extracted)
+    monkeypatch.setattr(
+        "modgud.capture.extract_youtube", lambda captured_url: extracted
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1184,7 +1186,9 @@ def test_add_youtube_records_caption_refusal_as_a_distinct_outcome(
         chapters=(),
         caption_refusal=CaptionRefusal(reason="Sign in to confirm you're not a bot"),
     )
-    monkeypatch.setattr("modgud.cli.extract_youtube", lambda captured_url: extracted)
+    monkeypatch.setattr(
+        "modgud.capture.extract_youtube", lambda captured_url: extracted
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1238,7 +1242,9 @@ def test_add_youtube_keeps_ordinary_caption_errors_on_the_failed_path(
             reason="Unable to download subtitles: HTTP Error 500",
         ),
     )
-    monkeypatch.setattr("modgud.cli.extract_youtube", lambda captured_url: extracted)
+    monkeypatch.setattr(
+        "modgud.capture.extract_youtube", lambda captured_url: extracted
+    )
     monkeypatch.setattr(
         sys,
         "argv",
