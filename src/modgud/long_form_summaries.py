@@ -7,7 +7,8 @@ from typing import Literal
 from modgud.blobs import BlobStore
 from modgud.config import Settings
 from modgud.formats import TRANSCRIPT_FORMATS, ItemFormat
-from modgud.models import RoutedModelClient, create_model_client
+from modgud.model_completions import request_parsed_completion
+from modgud.models import create_model_client
 from modgud.source_material import fetch_source_texts
 
 _SYSTEM_PROMPT = """You write full-length summaries of saved items for someone
@@ -31,26 +32,11 @@ class Tier2Summary:
     error: str | None
 
 
-def _request_section(routed: RoutedModelClient, source_text: str) -> str | None:
-    for _attempt in range(2):
-        completion = routed.client.chat.completions.create(
-            model=routed.model,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": source_text},
-            ],
-        )
-        try:
-            content = completion.choices[0].message.content
-            if not isinstance(content, str):
-                raise TypeError("model returned no summary content")
-            section = content.strip()
-            if not section:
-                raise ValueError("model returned an empty summary")
-        except (IndexError, TypeError, ValueError):
-            continue
-        return section
-    return None
+def _parse_section(content: str) -> str:
+    section = content.strip()
+    if not section:
+        raise ValueError("model returned an empty summary")
+    return section
 
 
 def _store_result(
@@ -135,7 +121,9 @@ def generate_long_form_summary(
     sections: list[str] = []
     try:
         for source_text in source_texts:
-            section = _request_section(routed, source_text)
+            section = request_parsed_completion(
+                routed, source_text, system_prompt=_SYSTEM_PROMPT, parse=_parse_section
+            )
             if section is None:
                 break
             sections.append(section)

@@ -9,6 +9,7 @@ from modgud.blobs import BlobStore
 from modgud.config import Settings
 from modgud.formats import DOCUMENT_FORMATS, TRANSCRIPT_FORMATS
 from modgud.item_lifecycle import mark_summarized, mark_summary_failed
+from modgud.model_completions import request_parsed_completion
 from modgud.models import RoutedModelClient, create_model_client
 from modgud.source_material import fetch_source_texts
 
@@ -71,23 +72,13 @@ def _request_summary(
     *,
     system_prompt: str = _SYSTEM_PROMPT,
 ) -> Tier1Summary | None:
-    for _attempt in range(2):
-        completion = routed.client.chat.completions.create(
-            model=routed.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": source_text},
-            ],
-            response_format={"type": "json_object"},
-        )
-        try:
-            content = completion.choices[0].message.content
-            if not isinstance(content, str):
-                raise TypeError("model returned no summary content")
-            return _parse_summary(content)
-        except (IndexError, TypeError, ValueError):
-            continue
-    return None
+    return request_parsed_completion(
+        routed,
+        source_text,
+        system_prompt=system_prompt,
+        parse=_parse_summary,
+        json_object=True,
+    )
 
 
 def parse_stored_claims(claims_json: object) -> tuple[str, ...]:

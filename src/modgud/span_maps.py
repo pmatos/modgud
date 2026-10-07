@@ -7,6 +7,7 @@ from typing import Any, cast
 
 from modgud.blobs import BlobStore
 from modgud.config import Settings
+from modgud.model_completions import request_parsed_completion
 from modgud.models import create_model_client
 from modgud.source_material import fetch_transcript_chunks
 from modgud.transcripts import TranscriptChunk
@@ -169,25 +170,14 @@ def generate_span_map(
         ensure_ascii=False,
     )
     routed = create_model_client("span_map", settings=settings)
-    span_map = None
     try:
-        for _attempt in range(2):
-            completion = routed.client.chat.completions.create(
-                model=routed.model,
-                messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": model_input},
-                ],
-                response_format={"type": "json_object"},
-            )
-            try:
-                content = completion.choices[0].message.content
-                if not isinstance(content, str):
-                    raise TypeError("model returned no span-map content")
-                span_map = _resolve_spans(chunks, _parse_selections(content))
-            except (IndexError, TypeError, ValueError):
-                continue
-            break
+        span_map = request_parsed_completion(
+            routed,
+            model_input,
+            system_prompt=_SYSTEM_PROMPT,
+            parse=lambda content: _resolve_spans(chunks, _parse_selections(content)),
+            json_object=True,
+        )
     finally:
         routed.client.close()
 
