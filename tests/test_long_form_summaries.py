@@ -13,8 +13,10 @@ from modgud.config import Settings, get_settings
 from modgud.database import connect
 from modgud.long_form_summaries import (
     Tier2Summary,
+    fail_long_form_summary,
     generate_long_form_summary,
     get_long_form_summary,
+    recover_interrupted_long_form_summaries,
     request_long_form_summary,
 )
 
@@ -382,3 +384,90 @@ def test_a_second_request_is_free_once_completed(tmp_path: Path) -> None:
     assert stored == Tier2Summary(
         status="completed", summary_text=long_form_text, error=None
     )
+
+
+def test_recovery_fails_only_interrupted_long_form_summaries(tmp_path: Path) -> None:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_ids = [
+            connection.execute(
+                """
+                INSERT INTO items (canonical_url, content_hash, format, state, source)
+                VALUES (?, ?, 'web', 'summarized', 'example.com')
+                """,
+                (f"https://example.com/{index}", str(index) * 64),
+            ).lastrowid
+            for index in range(3)
+        ]
+        assert all(item_id is not None for item_id in item_ids)
+        pending_id, completed_id, failed_id = item_ids
+        assert pending_id is not None
+        assert completed_id is not None
+        assert failed_id is not None
+        connection.execute(
+            "INSERT INTO tier_2_summaries (item_id, status) VALUES (?, 'pending')",
+            (pending_id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO tier_2_summaries (item_id, status, summary_text)
+            VALUES (?, 'completed', 'An existing summary')
+            """,
+            (completed_id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO tier_2_summaries (item_id, status, error)
+            VALUES (?, 'failed', 'An earlier error')
+            """,
+            (failed_id,),
+        )
+
+        recover_interrupted_long_form_summaries(connection)
+
+        assert get_long_form_summary(connection, pending_id) == Tier2Summary(
+            status="failed", summary_text=None, error="interrupted before completion"
+        )
+        assert get_long_form_summary(connection, completed_id) == Tier2Summary(
+            status="completed", summary_text="An existing summary", error=None
+        )
+        assert get_long_form_summary(connection, failed_id) == Tier2Summary(
+            status="failed", summary_text=None, error="An earlier error"
+        )
+        assert request_long_form_summary(connection, pending_id) is True
+
+
+def test_failed_worker_records_error_without_creating_an_unrequested_summary(
+    tmp_path: Path,
+) -> None:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (canonical_url, content_hash, format, state, source)
+            VALUES ('https://example.com/worker', 'worker-item', 'web',
+                    'summarized', 'example.com')
+            """
+        ).lastrowid
+        assert item_id is not None
+        assert request_long_form_summary(connection, item_id) is True
+
+        fail_long_form_summary(connection, item_id, RuntimeError("  "))
+
+        assert get_long_form_summary(connection, item_id) == Tier2Summary(
+            status="failed", summary_text=None, error="RuntimeError"
+        )
+        assert request_long_form_summary(connection, item_id) is True
+        fail_long_form_summary(connection, item_id, ValueError("bad response"))
+        assert get_long_form_summary(connection, item_id) == Tier2Summary(
+            status="failed", summary_text=None, error="bad response"
+        )
+
+        another_id = connection.execute(
+            """
+            INSERT INTO items (canonical_url, content_hash, format, state, source)
+            VALUES ('https://example.com/other', 'other-item', 'web',
+                    'summarized', 'example.com')
+            """
+        ).lastrowid
+        assert another_id is not None
+        fail_long_form_summary(connection, another_id, RuntimeError("ignored"))
+        assert get_long_form_summary(connection, another_id) is None
