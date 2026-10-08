@@ -35,13 +35,11 @@ if you need the PR number — do not assume one. Stay on branch
 
 ## Exit
 
-Exit 0 once `/simplify` has run and any fixes are pushed, or it found nothing
-to simplify, and no `BLOCKED.md` exists in the workspace. The orchestrator
-then enters the wait state and starts polling CI and merge signals.
+Once `/simplify` has run and any fixes are pushed, or it found nothing to
+simplify, end with a `success` claim. The orchestrator then enters the wait
+state and starts polling CI and merge signals.
 
 If it cannot proceed, post a `gh pr comment` explaining what blocked you,
-then **write `BLOCKED.md` in the workspace root** (uncommitted) with the same
-explanation and exit 0. A Bash tool call's `exit 1` only ends that subshell,
-not the provider session, so it cannot make `provider_success` false — the
-FSM instead gates this state's advance on `BLOCKED.md` not existing; writing
-that file is what routes the run to its blocked exit.
+then end with a `blocked` claim carrying the same explanation. A Bash tool
+call's `exit 1` only ends that subshell, not the provider session, so the
+final claim is what routes the run to its blocked exit.

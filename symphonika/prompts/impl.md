@@ -22,8 +22,11 @@ via the routing config; never hardcode a provider or a base URL.
 
 ## What to do
 
-1. Read the issue, then read `DESIGN.md` and the code the issue touches before
-   editing.
+0. `{{workspace.path}}/PLAN.md` was written and committed by the planning
+   stage. Execute it. If it is missing or stale, re-derive the plan from the
+   issue first (`gh issue view {{issue.number}}`).
+1. Read the issue, then read `DESIGN.md` and `CONTEXT.md` and the code the
+   issue touches before editing.
 2. Implement the issue test-first. Tests should assert behavior, not
    implementation shape.
 3. Honour the issue's `Blocked by` list: if it names work that is not in `main`
@@ -32,8 +35,12 @@ via the routing config; never hardcode a provider or a base URL.
    `uv run ruff check .`, `uv run ruff format --check .`, the configured type
    check, and `uv run pytest`. Run each as a **separate command** — never
    `&&`-chained, because a failing early step would silently skip the rest.
-5. Commit, push {{branch.name}}, and open a non-draft pull request with the
-   local `gh` CLI. **This is the actual finish line for this turn** — the
+5. Drop the plan, which is a stage-handoff artefact and must not ship:
+   `git rm PLAN.md` and commit it as `chore: drop stage-handoff PLAN.md` after
+   the quality gate has passed, as the last commit before pushing.
+   `git diff --stat main...HEAD` must not list `PLAN.md`. Then commit any
+   remaining changes, push {{branch.name}}, and open a non-draft pull request
+   with the local `gh` CLI. **This is the actual finish line for this turn** — the
    orchestrator does not inspect local commits, only whether an open PR exists
    for this branch. A correct, fully-committed fix that never gets pushed and
    opened as a PR reads to the orchestrator as a wasted run: nothing reviews,
@@ -44,11 +51,11 @@ via the routing config; never hardcode a provider or a base URL.
    open the PR anyway, noting what you did not verify in the PR description.
 6. Remove the issue's `agent-ready` label after the PR is open.
 7. If the work cannot proceed, leave a `gh issue comment` describing what
-   blocked it, write `BLOCKED.md` in the workspace root (uncommitted) with the
-   same explanation, and exit 0. The orchestrator gates this state's advance
-   on `BLOCKED.md` not existing — a Bash tool call's `exit 1` only ends that
-   subshell, not the provider session, so it cannot signal failure on its
-   own.
+   blocked it, then end with a `blocked` claim carrying the same explanation.
+   A Bash tool call's `exit 1` only ends that subshell, not the provider
+   session, so the final claim is what routes the run to its blocked exit.
+8. Once the pull request is open and `agent-ready` is removed, end with a
+   `success` claim. The orchestrator drives the PR from there.
 
 ## Scope
 
