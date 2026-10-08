@@ -1,29 +1,54 @@
 workflow:
   name: modgud_issue_to_merge
-  initial: implement
+  initial: plan
   states:
-    # Implementation. The provider reads prompts/impl.md, implements the
-    # issue test-first, opens the PR, removes agent-ready, exits 0.
+    # Planning pass. Invokes the pm-plan skill against the issue and commits
+    # the result as PLAN.md, which the implement stage executes. Gated on the
+    # agent's own claim like every other agent state: a blocked claim routes
+    # to failed, and a missing or malformed claim falls through to failed.
+    # artifact_exists probes the Run Workspace for PLAN.md itself, and
+    # branch_advanced_since_attempt_start is false unless this run added a
+    # commit, so a resumed attempt cannot coast on a PLAN.md an earlier
+    # attempt left behind.
+    plan:
+      action:
+        kind: agent
+        provider: claude
+        prompt: prompts/plan.md
+      transitions:
+        - to: failed
+          when:
+            claim_status: blocked
+        - to: implement
+          when:
+            claim_status: success
+            provider_success: true
+            artifact_exists: PLAN.md
+            branch_advanced_since_attempt_start: true
+        - to: failed
+
+    # Implementation. The provider reads prompts/impl.md, executes PLAN.md
+    # test-first, opens the PR, removes agent-ready, and ends with a success
+    # claim.
     #
-    # branch_ahead_of_base guards the empty-success case: a provider that
-    # exits 0 having committed nothing has not implemented anything, so it
-    # must not advance into the review states.
+    # branch_ahead_of_base alone would be satisfied by the plan commit already
+    # on the branch, so require this run to advance HEAD too.
     implement:
       action:
         kind: agent
         provider: claude
         prompt: prompts/impl.md
       transitions:
-        # A blocked pass writes BLOCKED.md instead of relying on a non-zero
-        # exit code -- exiting non-zero from a Bash tool call only ends that
-        # subshell, not the provider session, so provider_success reads true
-        # regardless. Ordered before the success transition below: a run that
-        # commits real progress and then hits a blocker later in the same
-        # turn must still route to failed, not coast into wait_for_pr_open on
-        # branch_ahead_of_base alone.
+        # A blocked pass ends with a blocked claim instead of relying on a
+        # non-zero exit code -- exiting non-zero from a Bash tool call only
+        # ends that subshell, not the provider session, so provider_success
+        # reads true regardless. Ordered before the success transition below:
+        # a run that commits real progress and then hits a blocker later in
+        # the same turn must still route to failed, not coast into
+        # wait_for_pr_open on branch_ahead_of_base alone.
         - to: failed
           when:
-            artifact_exists: BLOCKED.md
+            claim_status: blocked
         # branch_ahead_of_base only proves the agent committed something --
         # it says nothing about whether it ever pushed and opened the PR
         # prompts/impl.md tells it to (vow-lang/vow#1277: an implement run
@@ -34,8 +59,10 @@ workflow:
         # reason (symphonika issue #730, #1255).
         - to: wait_for_pr_open
           when:
+            claim_status: success
             provider_success: true
             branch_ahead_of_base: true
+            branch_advanced_since_attempt_start: true
         - to: failed
 
     # pr_signal predicates (pr_open/pr_merged/...) are only projected for
@@ -70,15 +97,19 @@ workflow:
         provider: claude
         prompt: prompts/code-review-fix.md
       transitions:
-        # A blocked pass (no open PR to review, etc.) writes BLOCKED.md
-        # instead of relying on a non-zero exit code -- exiting non-zero from
-        # a Bash tool call only ends that subshell, not the provider session,
-        # so provider_success reads true regardless.
+        # The pass ends with a structured claim as its final message. A
+        # blocked pass (no open PR to review, etc.) claims "blocked" instead
+        # of relying on a non-zero exit code -- exiting non-zero from a Bash
+        # tool call only ends that subshell, not the provider session, so
+        # provider_success reads true regardless. Advance needs a positive
+        # success claim, so a missing or malformed claim falls through to
+        # failed.
         - to: failed
           when:
-            artifact_exists: BLOCKED.md
+            claim_status: blocked
         - to: simplify
           when:
+            claim_status: success
             provider_success: true
         - to: failed
 
@@ -90,9 +121,10 @@ workflow:
       transitions:
         - to: failed
           when:
-            artifact_exists: BLOCKED.md
+            claim_status: blocked
         - to: wait_for_pr
           when:
+            claim_status: success
             provider_success: true
         - to: failed
 
@@ -152,9 +184,10 @@ workflow:
       transitions:
         - to: failed
           when:
-            artifact_exists: BLOCKED.md
+            claim_status: blocked
         - to: wait_for_pr
           when:
+            claim_status: success
             provider_success: true
         - to: failed
 
@@ -166,9 +199,10 @@ workflow:
       transitions:
         - to: failed
           when:
-            artifact_exists: BLOCKED.md
+            claim_status: blocked
         - to: wait_for_pr
           when:
+            claim_status: success
             provider_success: true
         - to: failed
 
