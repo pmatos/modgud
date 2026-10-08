@@ -112,6 +112,15 @@ package derives source texts from an item id. What the module deliberately does
 passed in, because tier 1 and tier 2 genuinely differ — tier 2 excludes PDFs and
 tier 1 does not.
 
+## Model completion
+
+A chat response requested for a tier-1 artifact, a long-form summary section,
+or a span map. `modgud.model_completions` owns the common request shape, response
+text extraction, and two attempts for malformed output. Each caller supplies its
+own prompt and parser, so artifact validation and persistence remain with the
+owning module. Request failures still propagate, and the caller owns the routed
+model client's lifetime.
+
 ## Transcript chunk
 
 A slice of an item's transcript, carrying model-visible text and the exact
