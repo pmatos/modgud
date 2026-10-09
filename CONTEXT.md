@@ -121,6 +121,14 @@ own prompt and parser, so artifact validation and persistence remain with the
 owning module. Request failures still propagate, and the caller owns the routed
 model client's lifetime.
 
+## Long-form summary state
+
+An on-demand tier-2 summary is pending, completed, or failed.
+`modgud.long_form_summaries` owns those state changes, including retrying a
+failure, marking work interrupted by a process restart, and recording a worker
+exception. The web inlet owns request validation, thread scheduling, and the
+database connections that contain each transition.
+
 ## Transcript chunk
 
 A slice of an item's transcript, carrying model-visible text and the exact

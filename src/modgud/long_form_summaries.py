@@ -61,6 +61,38 @@ def _store_result(
     )
 
 
+def recover_interrupted_long_form_summaries(connection: sqlite3.Connection) -> None:
+    """Make pending work left by a process restart retryable."""
+    connection.execute(
+        """
+        UPDATE tier_2_summaries
+        SET status = 'failed',
+            summary_text = NULL,
+            error = 'interrupted before completion',
+            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE status = 'pending'
+        """
+    )
+
+
+def fail_long_form_summary(
+    connection: sqlite3.Connection, item_id: int, error: Exception
+) -> None:
+    """Record a worker failure for a previously requested summary."""
+    error_message = str(error).strip() or type(error).__name__
+    connection.execute(
+        """
+        UPDATE tier_2_summaries
+        SET status = 'failed',
+            summary_text = NULL,
+            error = ?,
+            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE item_id = ?
+        """,
+        (error_message, item_id),
+    )
+
+
 def get_long_form_summary(
     connection: sqlite3.Connection, item_id: int
 ) -> Tier2Summary | None:

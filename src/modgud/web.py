@@ -27,8 +27,10 @@ from modgud.label_tokens import (
 )
 from modgud.long_form_summaries import (
     LONG_FORM_SUMMARY_FORMATS,
+    fail_long_form_summary,
     generate_long_form_summary,
     get_long_form_summary,
+    recover_interrupted_long_form_summaries,
     request_long_form_summary,
 )
 from modgud.source_material import load_transcript_chunks
@@ -116,16 +118,7 @@ def create_app(
     with connect(database) as connection:
         # A generation thread cannot survive a process restart, so anything
         # still "pending" at startup was interrupted and must not hang forever.
-        connection.execute(
-            """
-            UPDATE tier_2_summaries
-            SET status = 'failed',
-                summary_text = NULL,
-                error = 'interrupted before completion',
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-            WHERE status = 'pending'
-            """
-        )
+        recover_interrupted_long_form_summaries(connection)
 
     def _error_response(
         request: Request, template_name: str, message: str, *, status_code: int = 404
@@ -356,19 +349,8 @@ def create_app(
                     connection, blob_store, item_id, settings=active_settings
                 )
         except Exception as error:  # noqa: BLE001 - must surface, never hang pending
-            error_message = str(error).strip() or type(error).__name__
             with connect(database) as connection:
-                connection.execute(
-                    """
-                    UPDATE tier_2_summaries
-                    SET status = 'failed',
-                        summary_text = NULL,
-                        error = ?,
-                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                    WHERE item_id = ?
-                    """,
-                    (error_message, item_id),
-                )
+                fail_long_form_summary(connection, item_id, error)
 
     @app.get("/items/{item_id}/summary", response_class=HTMLResponse)
     def item_long_form_summary(request: Request, item_id: int) -> HTMLResponse:
