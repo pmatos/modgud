@@ -2,96 +2,37 @@
 
 import json
 import re
-import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email.utils import parseaddr
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Protocol, cast
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlsplit
-from urllib.request import Request, urlopen
+from typing import Any, Protocol
+from urllib.parse import urlsplit
 
-from modgud.config import SecretValue
 from modgud.database import connect
+from modgud.postmark import PostmarkClient, PostmarkError
+
+__all__ = [
+    "InboundClient",
+    "InboundExtraction",
+    "PendingInboundCapture",
+    "PollResult",
+    "PostmarkClient",
+    "PostmarkError",
+    "extract_inbound_message",
+    "pending_inbound_captures",
+    "poll_inbound",
+]
 
 _PAGE_SIZE = 500
-_POSTMARK_API_URL = "https://api.postmarkapp.com"
-_RETRY_DELAYS = (1.0, 2.0, 4.0)
 _URL_PATTERN = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 _FORWARDED_MARKER = re.compile(
     r"^(?:-+\s*)?(?:(?:begin\s+)?forwarded|original) message"
     r"(?:\s*-+)?\s*:?[ \t]*$",
     re.IGNORECASE,
 )
-
-
-class PostmarkError(RuntimeError):
-    """Postmark could not return a usable API response."""
-
-
-class PostmarkClient:
-    """Small adapter for the Postmark inbound Messages API."""
-
-    def __init__(
-        self,
-        server_token: SecretValue,
-        *,
-        base_url: str = _POSTMARK_API_URL,
-        sleep: Callable[[float], None] = time.sleep,
-    ) -> None:
-        self._server_token = server_token
-        self._base_url = base_url.rstrip("/")
-        self._sleep = sleep
-
-    def search_inbound(self, *, count: int, offset: int) -> Mapping[str, Any]:
-        query = urlencode({"count": count, "offset": offset, "status": "processed"})
-        return self._get_json(f"/messages/inbound?{query}")
-
-    def get_inbound(self, message_id: str) -> Mapping[str, Any]:
-        encoded_id = quote(message_id, safe="")
-        return self._get_json(f"/messages/inbound/{encoded_id}/details")
-
-    def _get_json(self, path: str) -> Mapping[str, Any]:
-        request = Request(
-            f"{self._base_url}{path}",
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "modgud/0.1",
-                "X-Postmark-Server-Token": self._server_token.reveal(),
-            },
-        )
-        for attempt in range(len(_RETRY_DELAYS) + 1):
-            try:
-                with urlopen(request, timeout=30) as response:
-                    document = json.loads(response.read())
-                if not isinstance(document, dict):
-                    raise TypeError("response is not a JSON object")
-                return cast("dict[str, Any]", document)
-            except (
-                HTTPError,
-                URLError,
-                TimeoutError,
-                UnicodeDecodeError,
-                json.JSONDecodeError,
-                TypeError,
-                ValueError,
-            ) as error:
-                if attempt == len(_RETRY_DELAYS):
-                    detail = (
-                        f"HTTP {error.code}"
-                        if isinstance(error, HTTPError)
-                        else type(error).__name__
-                    )
-                    raise PostmarkError(
-                        "Postmark API request failed after "
-                        f"{attempt + 1} attempts ({detail})"
-                    ) from error
-                self._sleep(_RETRY_DELAYS[attempt])
-
-        raise AssertionError("unreachable")
 
 
 class InboundClient(Protocol):
