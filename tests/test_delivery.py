@@ -62,6 +62,7 @@ def _deliver_digest(
 class _PostmarkHandler(BaseHTTPRequestHandler):
     requests: ClassVar[list[tuple[str, dict[str, str], dict[str, object]]]] = []
     statuses: ClassVar[list[int]] = []
+    response_bodies: ClassVar[list[bytes] | None] = None
 
     def do_POST(self) -> None:
         content_length = int(self.headers["Content-Length"])
@@ -76,6 +77,9 @@ class _PostmarkHandler(BaseHTTPRequestHandler):
                 "To": document["To"],
             }
         ).encode()
+        responses = type(self).response_bodies
+        if responses is not None:
+            response = responses.pop(0)
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(response)))
@@ -89,12 +93,15 @@ class _PostmarkHandler(BaseHTTPRequestHandler):
 @contextmanager
 def serve_postmark(
     statuses: list[int],
+    *,
+    responses: list[bytes] | None = None,
 ) -> Iterator[tuple[str, type[_PostmarkHandler]]]:
     class Handler(_PostmarkHandler):
         pass
 
     Handler.requests = []
     Handler.statuses = statuses.copy()
+    Handler.response_bodies = responses.copy() if responses is not None else None
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever)
     thread.start()
@@ -245,6 +252,44 @@ def test_postmark_retries_transient_failures_with_the_same_multipart_email() -> 
             "TextBody": "The digest",
             "To": "reader@example.com",
         }
+
+
+@pytest.mark.parametrize(
+    "invalid_response",
+    [
+        b'{"ErrorCode": 422, "MessageID": "rejected"}',
+        b'{"ErrorCode": 0}',
+        b'{"ErrorCode": 0, "MessageID": ""}',
+        b'{"ErrorCode": 0, "MessageID": 123}',
+        b"[]",
+        b"not JSON",
+        b"\xff",
+    ],
+)
+def test_postmark_retries_unusable_success_responses(invalid_response: bytes) -> None:
+    delays: list[float] = []
+    email = DigestEmail(
+        from_address="modgud@example.com",
+        to_address="reader@example.com",
+        subject="modgud digest",
+        html_body="<p>The digest</p>",
+        text_body="The digest",
+    )
+    with serve_postmark(
+        [200, 200],
+        responses=[invalid_response, b'{"ErrorCode": 0, "MessageID": "accepted"}'],
+    ) as (base_url, handler):
+        client = PostmarkEmailClient(
+            SecretValue("server-token-secret"),
+            base_url=base_url,
+            sleep=delays.append,
+        )
+        message_id = client.send_email(email)
+
+    assert message_id == "accepted"
+    assert delays == [1.0]
+    assert len(handler.requests) == 2
+    assert handler.requests[0] == handler.requests[1]
 
 
 def test_exhausted_send_retries_leave_no_event_and_preserve_the_selection(

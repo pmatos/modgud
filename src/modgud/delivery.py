@@ -1,118 +1,30 @@
 """Deliver rendered digests through an external email service."""
 
-import json
-import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol, cast
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from typing import Protocol
 
 from modgud.config import SecretValue
 from modgud.database import connect
 from modgud.digests import render_digest, select_digest_items
 from modgud.events import ItemLog
+from modgud.postmark import DigestEmail, PostmarkDeliveryError, PostmarkEmailClient
 
-_POSTMARK_API_URL = "https://api.postmarkapp.com"
-_RETRY_DELAYS = (1.0, 2.0, 4.0)
-
-
-@dataclass(frozen=True, slots=True)
-class DigestEmail:
-    """One self-contained digest ready for an email service."""
-
-    from_address: str
-    to_address: str
-    subject: str
-    html_body: str
-    text_body: str
+__all__ = [
+    "DigestDeliveryResult",
+    "DigestEmail",
+    "EmailClient",
+    "PostmarkDeliveryError",
+    "PostmarkEmailClient",
+    "deliver_digest",
+]
 
 
 class EmailClient(Protocol):
     """The external email operation required by digest delivery."""
 
     def send_email(self, message: DigestEmail) -> str: ...
-
-
-class PostmarkDeliveryError(RuntimeError):
-    """Postmark could not accept an outbound digest."""
-
-
-class PostmarkEmailClient:
-    """Small adapter for Postmark's single-email API."""
-
-    def __init__(
-        self,
-        server_token: SecretValue,
-        *,
-        base_url: str = _POSTMARK_API_URL,
-        sleep: Callable[[float], None] = time.sleep,
-    ) -> None:
-        self._server_token = server_token
-        self._base_url = base_url.rstrip("/")
-        self._sleep = sleep
-
-    def send_email(self, message: DigestEmail) -> str:
-        """Submit one multipart digest and return Postmark's message ID."""
-        body = json.dumps(
-            {
-                "From": message.from_address,
-                "HtmlBody": message.html_body,
-                "MessageStream": "outbound",
-                "Subject": message.subject,
-                "TextBody": message.text_body,
-                "To": message.to_address,
-            },
-            separators=(",", ":"),
-        ).encode()
-        request = Request(
-            f"{self._base_url}/email",
-            data=body,
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "User-Agent": "modgud/0.1",
-                "X-Postmark-Server-Token": self._server_token.reveal(),
-            },
-            method="POST",
-        )
-        for attempt in range(len(_RETRY_DELAYS) + 1):
-            try:
-                with urlopen(request, timeout=30) as response:
-                    document = json.loads(response.read())
-                if not isinstance(document, dict):
-                    raise TypeError("response is not a JSON object")
-                response_object = cast("dict[str, Any]", document)
-                if response_object.get("ErrorCode") != 0:
-                    raise ValueError("Postmark rejected the message")
-                message_id = response_object.get("MessageID")
-                if not isinstance(message_id, str) or not message_id:
-                    raise ValueError("Postmark response has no message ID")
-                return message_id
-            except (
-                HTTPError,
-                URLError,
-                TimeoutError,
-                UnicodeDecodeError,
-                json.JSONDecodeError,
-                TypeError,
-                ValueError,
-            ) as error:
-                if attempt == len(_RETRY_DELAYS):
-                    detail = (
-                        f"HTTP {error.code}"
-                        if isinstance(error, HTTPError)
-                        else type(error).__name__
-                    )
-                    raise PostmarkDeliveryError(
-                        "Postmark email send failed after "
-                        f"{attempt + 1} attempts ({detail})"
-                    ) from error
-                self._sleep(_RETRY_DELAYS[attempt])
-
-        raise AssertionError("unreachable")
 
 
 @dataclass(frozen=True, slots=True)

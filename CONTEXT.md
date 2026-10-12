@@ -152,3 +152,16 @@ A reader's verdict on an item, `worth-it` or `not-worth-it`, recorded as a
 `label` event from a signed one-click link in a digest. Labels are the system's
 only feedback signal and are meant to outlive any model or implementation
 choice.
+
+## Postmark request
+
+An authenticated JSON exchange for searching inbound messages, retrieving one
+message's details, or sending a digest email. `modgud.postmark` owns the three
+operations, their wire formats, and the common timeout, response decoding, and
+four-attempt retry policy. Outbound acceptance checks run within those retries;
+inbound queue and cursor validation remain with the inbound inlet.
+
+The module also defines the digest email value and the existing Postmark
+failures. `modgud.inbound` and `modgud.delivery` re-export their original names
+so callers retain their existing interfaces. Successful-send events, digest
+selection, queue persistence, and scheduling remain with their owning modules.
