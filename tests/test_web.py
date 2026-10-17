@@ -360,6 +360,61 @@ def test_home_page_uses_a_served_stylesheet_without_client_javascript(
     assert "--surface:" in stylesheet.text
 
 
+@pytest.mark.parametrize("method", ["get", "post"])
+@pytest.mark.parametrize(
+    ("label", "status", "message"),
+    [
+        ("maybe", 404, "Label not recognized"),
+        ("worth-it", 400, "This label link is invalid or incomplete"),
+    ],
+)
+def test_label_validation_precedes_missing_item_lookup(
+    tmp_path: Path,
+    method: str,
+    label: str,
+    status: int,
+    message: str,
+) -> None:
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.request(method, f"/items/404/labels/{label}")
+
+    assert response.status_code == status
+    assert message in response.text
+    assert "No label was recorded" in response.text
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        assert connection.execute("SELECT count(*) FROM events").fetchone()[0] == 0
+
+
+def test_repeated_label_confirmation_posts_each_append_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    with connect(database) as connection:
+        connection.execute(
+            """
+            INSERT INTO items (canonical_url, content_hash, format, state, source)
+            VALUES ('https://example.com/repeated', 'repeated', 'web',
+                    'captured', 'example.com')
+            """
+        )
+    settings = _settings_with_label_secret(tmp_path, monkeypatch)
+    target = _signed_label_target(
+        1, "worth-it", settings=settings, now=datetime.now(UTC)
+    )
+
+    with TestClient(create_app(tmp_path, settings=settings)) as client:
+        first = client.post(target)
+        second = client.post(target)
+
+    assert first.status_code == second.status_code == 200
+    with connect(database) as connection:
+        assert connection.execute(
+            "SELECT item_id, type, json_extract(payload, '$.label') "
+            "FROM events ORDER BY id"
+        ).fetchall() == [(1, "label", "worth-it"), (1, "label", "worth-it")]
+
+
 def test_a_digest_token_cannot_be_reused_for_another_item(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

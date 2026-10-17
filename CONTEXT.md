@@ -153,6 +153,20 @@ A reader's verdict on an item, `worth-it` or `not-worth-it`, recorded as a
 only feedback signal and are meant to outlive any model or implementation
 choice.
 
+### Label acceptance
+
+Resolving a signed Label link for confirmation or recording its opinion.
+`modgud.labels.LabelLinks` owns recognized opinions, capability validation,
+Item lookup, display fields, and the confirmed write through `ItemLog`. It
+rejects unknown opinions and unusable capabilities before opening the database,
+and reports semantic failure reasons independently of HTTP wording.
+
+Confirmation never appends a Label. Recording resolves the Item and appends one
+event in a transaction owned by the Label module; each accepted submission
+appends history, including repeated use of the same link. The web inlet owns
+GET/POST routing, confirmation and result templates, and failure presentation.
+Token signing and validation remain with `modgud.label_tokens`.
+
 ## Postmark request
 
 An authenticated JSON exchange for searching inbound messages, retrieving one

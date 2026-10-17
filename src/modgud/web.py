@@ -18,13 +18,8 @@ from modgud.blobs import BlobStore
 from modgud.capture import capture_url
 from modgud.config import Settings
 from modgud.database import connect
-from modgud.events import ItemLog
 from modgud.formats import TRANSCRIPT_FORMATS, ItemFormat
-from modgud.label_tokens import (
-    ExpiredLabelToken,
-    InvalidLabelToken,
-    validate_label_token,
-)
+from modgud.labels import LabelFailure, LabelLinks, LabelRejected
 from modgud.long_form_summaries import (
     LONG_FORM_SUMMARY_FORMATS,
     fail_long_form_summary,
@@ -48,9 +43,13 @@ _ITEM_STATES = (
     "unsummarizable",
     "failed",
 )
-_LABEL_NAMES = {
-    "worth-it": "Worth it",
-    "not-worth-it": "Not worth it",
+_LABEL_ERRORS = {
+    LabelFailure.UNKNOWN_OPINION: ("Label not recognized", 404),
+    LabelFailure.INVALID_LINK: ("This label link is invalid or incomplete", 400),
+    LabelFailure.WRONG_ITEM: ("This label link is not valid for this item", 400),
+    LabelFailure.WRONG_OPINION: ("This label link is not valid for this opinion", 400),
+    LabelFailure.EXPIRED_LINK: ("This label link has expired", 410),
+    LabelFailure.MISSING_ITEM: ("Item not found", 404),
 }
 _DISPLAY_URL_SQL = "coalesce(page_url, canonical_url)"
 _DISPLAY_TITLE_SQL = f"coalesce(title, {_DISPLAY_URL_SQL})"
@@ -114,6 +113,13 @@ def create_app(
     )
     database = data_dir / "modgud.sqlite3"
     blob_store = BlobStore(data_dir / "blobs")
+    label_links = LabelLinks(
+        database,
+        signing_secret=(
+            settings.secrets.label_token_secret if settings is not None else None
+        ),
+        clock=clock,
+    )
 
     with connect(database) as connection:
         # A generation thread cannot survive a process restart, so anything
@@ -144,45 +150,9 @@ def create_app(
             request, "item_error.html", message, status_code=status_code
         )
 
-    def invalid_label_token(
-        request: Request,
-        item_id: int,
-        label: str,
-    ) -> HTMLResponse | None:
-        signing_secret = (
-            settings.secrets.label_token_secret if settings is not None else None
-        )
-        token = request.query_params.get("token")
-        if signing_secret is None or token is None:
-            return label_error(
-                request,
-                "This label link is invalid or incomplete",
-                status_code=400,
-            )
-        try:
-            validate_label_token(
-                token,
-                item_id,
-                label,
-                signing_secret=signing_secret,
-                now=clock(),
-            )
-        except ExpiredLabelToken:
-            return label_error(
-                request,
-                "This label link has expired",
-                status_code=410,
-            )
-        except InvalidLabelToken as error:
-            message = (
-                "This label link is not valid for this item"
-                if str(error) == "wrong item"
-                else "This label link is not valid for this opinion"
-                if str(error) == "wrong label"
-                else "This label link is invalid or incomplete"
-            )
-            return label_error(request, message, status_code=400)
-        return None
+    def rejected_label(request: Request, error: LabelRejected) -> HTMLResponse:
+        message, status_code = _LABEL_ERRORS[error.reason]
+        return label_error(request, message, status_code=status_code)
 
     @app.get("/", response_class=HTMLResponse)
     def home(
@@ -419,59 +389,34 @@ def create_app(
 
     @app.get("/items/{item_id}/labels/{label}", response_class=HTMLResponse)
     def confirm_label(request: Request, item_id: int, label: str) -> HTMLResponse:
-        label_name = _LABEL_NAMES.get(label)
-        if label_name is None:
-            return label_error(request, "Label not recognized")
-        token_error = invalid_label_token(request, item_id, label)
-        if token_error is not None:
-            return token_error
-        with connect(database) as connection:
-            item = connection.execute(
-                f"""
-                SELECT {_DISPLAY_TITLE_SQL}, {_DISPLAY_URL_SQL}
-                FROM items
-                WHERE id = ?
-                """,
-                (item_id,),
-            ).fetchone()
-        if item is None:
-            return label_error(request, "Item not found")
+        try:
+            item = label_links.confirm(
+                item_id, label, request.query_params.get("token")
+            )
+        except LabelRejected as error:
+            return rejected_label(request, error)
         return _TEMPLATES.TemplateResponse(
             request=request,
             name="confirm_label.html",
             context={
-                "item": item,
-                "label": label,
-                "label_name": label_name,
+                "item": (item.title, item.url),
+                "label": item.opinion,
+                "label_name": item.opinion_name,
             },
         )
 
     @app.post("/items/{item_id}/labels/{label}", response_class=HTMLResponse)
     def record_label(request: Request, item_id: int, label: str) -> HTMLResponse:
-        label_name = _LABEL_NAMES.get(label)
-        if label_name is None:
-            return label_error(request, "Label not recognized")
-        token_error = invalid_label_token(request, item_id, label)
-        if token_error is not None:
-            return token_error
-        with connect(database) as connection:
-            item = connection.execute(
-                f"""
-                SELECT {_DISPLAY_TITLE_SQL}, {_DISPLAY_URL_SQL}
-                FROM items
-                WHERE id = ?
-                """,
-                (item_id,),
-            ).fetchone()
-            if item is None:
-                return label_error(request, "Item not found")
-            ItemLog(connection, item_id).label(label)
+        try:
+            item = label_links.record(item_id, label, request.query_params.get("token"))
+        except LabelRejected as error:
+            return rejected_label(request, error)
         return _TEMPLATES.TemplateResponse(
             request=request,
             name="label_recorded.html",
             context={
-                "item": item,
-                "label_name": label_name,
+                "item": (item.title, item.url),
+                "label_name": item.opinion_name,
             },
         )
 

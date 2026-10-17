@@ -18,6 +18,14 @@ class ExpiredLabelToken(InvalidLabelToken):
     """A once-valid label capability is past its signed expiry."""
 
 
+class WrongItemLabelToken(InvalidLabelToken):
+    """A valid capability belongs to a different Item."""
+
+
+class WrongOpinionLabelToken(InvalidLabelToken):
+    """A valid capability belongs to a different opinion."""
+
+
 def _decode(value: str) -> bytes:
     padding = "=" * (-len(value) % 4)
     try:
@@ -93,8 +101,8 @@ def validate_label_token(
     ):
         raise InvalidLabelToken("malformed payload")
     if payload["item_id"] != item_id:
-        raise InvalidLabelToken("wrong item")
+        raise WrongItemLabelToken("wrong item")
     if payload["label"] != label:
-        raise InvalidLabelToken("wrong label")
+        raise WrongOpinionLabelToken("wrong label")
     if now.timestamp() >= payload["expires_at"]:
         raise ExpiredLabelToken("expired token")
