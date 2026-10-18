@@ -18,7 +18,7 @@ from modgud.blobs import BlobStore
 from modgud.capture import capture_url
 from modgud.config import Settings
 from modgud.database import connect
-from modgud.formats import TRANSCRIPT_FORMATS, ItemFormat
+from modgud.formats import ItemFormat
 from modgud.labels import LabelFailure, LabelLinks, LabelRejected
 from modgud.long_form_summaries import (
     LONG_FORM_SUMMARY_FORMATS,
@@ -28,7 +28,7 @@ from modgud.long_form_summaries import (
     recover_interrupted_long_form_summaries,
     request_long_form_summary,
 )
-from modgud.source_material import load_transcript_chunks
+from modgud.source_material import get_transcript_chunks
 from modgud.summaries import get_tier_1_summary
 from modgud.transcripts import chunk_anchors, format_timestamp
 from modgud.urls import is_web_url
@@ -257,8 +257,7 @@ def create_app(
         with connect(database) as connection:
             item = connection.execute(
                 f"""
-                SELECT {_DISPLAY_TITLE_SQL}, {_DISPLAY_URL_SQL}, source,
-                       format, extracted_text_hash, chapters
+                SELECT {_DISPLAY_TITLE_SQL}, {_DISPLAY_URL_SQL}, source
                 FROM items
                 WHERE id = ?
                 """,
@@ -266,36 +265,20 @@ def create_app(
             ).fetchone()
             if item is None:
                 return item_error(request, "Item not found")
-            (
-                title,
-                canonical_url,
-                source,
-                item_format,
-                extracted_text_hash,
-                chapters_json,
-            ) = item
+            title, canonical_url, source = item
             summary = get_tier_1_summary(connection, item_id)
+            chunks = get_transcript_chunks(connection, blob_store, item_id)
         entries: list[TranscriptChunkEntry] | None = None
-        if item_format in TRANSCRIPT_FORMATS and extracted_text_hash is not None:
-            try:
-                chunks = load_transcript_chunks(
-                    blob_store,
-                    str(extracted_text_hash),
-                    chapters_json,
-                    item_id=item_id,
+        if chunks is not None:
+            anchors = chunk_anchors(chunks)
+            entries = [
+                TranscriptChunkEntry(
+                    anchor=anchors.get(chunk.id),
+                    timestamp=format_timestamp(chunk.start_ms),
+                    text=chunk.text,
                 )
-            except (OSError, ValueError, TypeError):
-                pass
-            else:
-                anchors = chunk_anchors(chunks)
-                entries = [
-                    TranscriptChunkEntry(
-                        anchor=anchors.get(chunk.id),
-                        timestamp=format_timestamp(chunk.start_ms),
-                        text=chunk.text,
-                    )
-                    for chunk in chunks
-                ]
+                for chunk in chunks
+            ]
         if entries is None and summary is None:
             return item_error(
                 request, "No summary or transcript is available for this item"
