@@ -1,4 +1,4 @@
-"""Fetch an item's extracted source material for model input.
+"""Resolve an item's extracted source material for models and display.
 
 Owns the one path from an item's stored ``format``/``extracted_text_hash``/
 ``chapters`` to model-ready text, so tier-1 summaries, tier-2 summaries, and
@@ -17,7 +17,7 @@ from modgud.transcripts import TranscriptChunk, chunk_transcript
 from modgud.youtube import Chapter
 
 
-def parse_chapters(chapters_json: object, *, item_id: int) -> tuple[Chapter, ...]:
+def _parse_chapters(chapters_json: object, *, item_id: int) -> tuple[Chapter, ...]:
     """Parse an item's stored chapters JSON into structured chapter markers."""
     if chapters_json is None:
         return ()
@@ -27,7 +27,7 @@ def parse_chapters(chapters_json: object, *, item_id: int) -> tuple[Chapter, ...
     return tuple(cast("list[Chapter]", parsed))
 
 
-def load_transcript_chunks(
+def _load_transcript_chunks(
     blob_store: BlobStore,
     extracted_text_hash: str,
     chapters_json: object,
@@ -42,7 +42,7 @@ def load_transcript_chunks(
     """
     transcript = blob_store.get(extracted_text_hash)
     return chunk_transcript(
-        transcript, chapters=parse_chapters(chapters_json, item_id=item_id)
+        transcript, chapters=_parse_chapters(chapters_json, item_id=item_id)
     )
 
 
@@ -82,7 +82,7 @@ def _fetch_item_source(
 def _nonempty_chunks(
     blob_store: BlobStore, source: _ItemSource, item_id: int
 ) -> tuple[TranscriptChunk, ...]:
-    chunks = load_transcript_chunks(
+    chunks = _load_transcript_chunks(
         blob_store, source.extracted_text_hash, source.chapters_json, item_id=item_id
     )
     if not chunks:
@@ -131,3 +131,29 @@ def fetch_transcript_chunks(
         connection, item_id, accepted_formats=TRANSCRIPT_FORMATS
     )
     return _nonempty_chunks(blob_store, source, item_id)
+
+
+def get_transcript_chunks(
+    connection: sqlite3.Connection,
+    blob_store: BlobStore,
+    item_id: int,
+) -> tuple[TranscriptChunk, ...] | None:
+    """Return displayable transcript chunks, or ``None`` when unavailable.
+
+    Unlike model input, a readable transcript with no cues is displayable as
+    an empty tuple. Missing Items, non-transcript formats, missing text, and
+    unreadable or malformed source material are unavailable. Database errors
+    still propagate. The caller owns the connection and presentation policy.
+    """
+    try:
+        source = _fetch_item_source(
+            connection, item_id, accepted_formats=TRANSCRIPT_FORMATS
+        )
+        return _load_transcript_chunks(
+            blob_store,
+            source.extracted_text_hash,
+            source.chapters_json,
+            item_id=item_id,
+        )
+    except (OSError, ValueError, TypeError):
+        return None

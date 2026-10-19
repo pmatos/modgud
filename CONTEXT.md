@@ -139,6 +139,13 @@ chunking mechanism in the system, not two: every reader of an item's transcript
 — goes through `modgud.source_material`, so their chunk boundaries cannot drift
 apart.
 
+Readers supply an Item id rather than stored transcript columns. Model input
+requires nonempty chunks and reports source-material failures. Display reads
+use `get_transcript_chunks`: a readable but empty transcript yields an empty
+tuple, while missing, unsupported, unreadable, or malformed source material
+yields `None`. Database failures still propagate. The web inlet owns summary
+fallback, timestamps, anchors, and error presentation.
+
 ## Origin
 
 Where a capture came from — the inbound mail target, the web drop box, or the

@@ -935,6 +935,31 @@ def test_item_transcript_renders_chunk_text_with_timestamps(tmp_path: Path) -> N
     assert 'id="t-65000"' in response.text
 
 
+def test_item_transcript_renders_an_empty_transcript(tmp_path: Path) -> None:
+    transcript_hash = BlobStore(tmp_path / "blobs").put(b"WEBVTT\n\n")
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = connection.execute(
+            """
+            INSERT INTO items (
+                canonical_url, content_hash, extracted_text_hash,
+                format, state, source, title
+            ) VALUES (
+                'https://example.com/empty-transcript', 'empty-transcript', ?,
+                'podcast', 'extracted', 'Practical Podcast', 'An empty transcript'
+            )
+            """,
+            (transcript_hash,),
+        ).lastrowid
+    assert item_id is not None
+
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(f"/items/{item_id}")
+
+    assert response.status_code == 200
+    assert "An empty transcript" in response.text
+    assert "No transcript content is available for this item." in response.text
+
+
 def test_item_transcript_anchors_match_span_map_start_times(tmp_path: Path) -> None:
     transcript = _vtt_transcript(
         [
