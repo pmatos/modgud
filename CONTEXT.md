@@ -37,6 +37,20 @@ presentation. Each inlet retains its own validation and presentation policy.
 An inbound message already marked processed is ignored without recording
 another capture.
 
+### Inbound poll
+
+One scheduled run of the email inlet: poll Postmark when due, then replay the
+durable queue through Capture. `modgud.inbound.run_inbound_poll` owns this
+sequence, including legacy message enrichment, queue order, and forwarding the
+Origin and Postmark message identity. Pending messages are replayed even when
+the poll interval skips network work; a failed poll prevents replay.
+
+Polling commits before replay, and each Capture commits independently. The
+caller receives each completed Capture synchronously before the next starts,
+and the poll result after replay finishes. A Capture or notification failure
+stops replay without undoing earlier progress. The CLI owns presentation;
+Capture retains atomic Item persistence and inbound acknowledgement.
+
 ## Document extraction
 
 Converting fetched or stored web/PDF bytes into normalized readable text and

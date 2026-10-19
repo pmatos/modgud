@@ -1,8 +1,8 @@
-"""Retrieve Postmark inbound messages into the durable processing queue."""
+"""Retrieve Postmark inbound messages and replay the durable Capture queue."""
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email.utils import parseaddr
@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
+from modgud.capture import CaptureResult, capture_url
+from modgud.config import Settings
 from modgud.database import connect
 from modgud.postmark import PostmarkClient, PostmarkError
 
@@ -24,6 +26,7 @@ __all__ = [
     "extract_inbound_message",
     "pending_inbound_captures",
     "poll_inbound",
+    "run_inbound_poll",
 ]
 
 _PAGE_SIZE = 500
@@ -66,6 +69,43 @@ class PendingInboundCapture:
     message_id: str
     target_url: str
     origin: str | None
+
+
+def run_inbound_poll(
+    data_dir: Path,
+    client: InboundClient,
+    settings: Settings,
+    *,
+    now: datetime,
+    on_capture: Callable[[CaptureResult], None],
+    force: bool = False,
+) -> PollResult:
+    """Poll when due, then replay pending Captures even when polling is skipped.
+
+    Polling commits before replay; each Capture owns its transaction. Notify
+    the caller synchronously after each completed Capture, before starting the
+    next. Poll, Capture, and notification failures propagate, leaving earlier
+    progress durable and later messages pending.
+    """
+    database = data_dir / "modgud.sqlite3"
+    result = poll_inbound(
+        database,
+        client,
+        poll_interval=settings.inbound_poll_interval,
+        now=now,
+        force=force,
+    )
+    for pending in pending_inbound_captures(database):
+        captured = capture_url(
+            data_dir,
+            pending.target_url,
+            settings,
+            origin=pending.origin,
+            inbound_message_id=pending.message_id,
+        )
+        if captured is not None:
+            on_capture(captured)
+    return result
 
 
 class _HtmlLinks(HTMLParser):
