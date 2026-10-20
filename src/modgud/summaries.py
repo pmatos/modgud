@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -84,9 +85,9 @@ def _request_summary(
 def parse_stored_claims(claims_json: object) -> tuple[str, ...]:
     """Decode and validate one stored ``tier_1_summaries.claims`` cell.
 
-    Shared by every reader of the table (this module, ``digests.py``) since
-    the CHECK constraint on the column enforces array shape but not element
-    types.
+    The CHECK constraint on the column enforces array shape but not element
+    types. Stored strings are preserved rather than reapplying model-output
+    validation.
     """
     claims = json.loads(str(claims_json))
     if not isinstance(claims, list) or any(
@@ -100,16 +101,35 @@ def get_tier_1_summary(
     connection: sqlite3.Connection, item_id: int
 ) -> Tier1Summary | None:
     """Return the stored tier-1 artifact for an item, if one exists."""
-    row = connection.execute(
-        "SELECT one_liner, claims FROM tier_1_summaries WHERE item_id = ?",
-        (item_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    one_liner, claims_json = row
-    return Tier1Summary(
-        one_liner=str(one_liner), claims=parse_stored_claims(claims_json)
-    )
+    return get_tier_1_summaries(connection, (item_id,)).get(item_id)
+
+
+def get_tier_1_summaries(
+    connection: sqlite3.Connection, item_ids: Iterable[int]
+) -> dict[int, Tier1Summary]:
+    """Read requested artifacts, omitting Items with no stored summary.
+
+    Uses the caller's connection without writing or committing. Invalid stored
+    claims and database failures propagate. IDs are consumed once; a single
+    JSON parameter avoids SQLite's limit on the number of bound variables.
+    """
+    requested_ids = tuple(item_ids)
+    if not requested_ids:
+        return {}
+    rows = connection.execute(
+        """
+        SELECT item_id, one_liner, claims
+        FROM tier_1_summaries
+        WHERE item_id IN (SELECT value FROM json_each(?))
+        """,
+        (json.dumps(requested_ids),),
+    ).fetchall()
+    return {
+        int(item_id): Tier1Summary(
+            one_liner=str(one_liner), claims=parse_stored_claims(claims_json)
+        )
+        for item_id, one_liner, claims_json in rows
+    }
 
 
 def summarize_item(
