@@ -11,7 +11,7 @@ from modgud.capture import CaptureResult, capture_url
 from modgud.config import ConfigError, Settings, default_config_path, get_settings
 from modgud.database import connect
 from modgud.delivery import PostmarkEmailClient, deliver_digest
-from modgud.inbound import PostmarkClient, pending_inbound_captures, poll_inbound
+from modgud.inbound import PostmarkClient, run_inbound_poll
 from modgud.origin_reports import render_origin_report
 from modgud.podcast_transcripts import run_podcast_transcript_batch
 from modgud.reprocess import ReprocessError, reprocess_item
@@ -239,23 +239,14 @@ def main(*, local_now: datetime | None = None) -> None:
     elif arguments.command == "poll-inbound":
         if postmark_server_token is None:
             raise AssertionError("Postmark token was validated before dispatch")
-        poll_result = poll_inbound(
-            data_dir / "modgud.sqlite3",
+        poll_result = run_inbound_poll(
+            data_dir,
             PostmarkClient(postmark_server_token),
-            poll_interval=settings.inbound_poll_interval,
+            settings,
             now=datetime.now(UTC),
+            on_capture=_print_capture_result,
             force=arguments.force,
         )
-        for pending in pending_inbound_captures(data_dir / "modgud.sqlite3"):
-            capture_result = capture_url(
-                data_dir,
-                pending.target_url,
-                settings,
-                origin=pending.origin,
-                inbound_message_id=pending.message_id,
-            )
-            if capture_result is not None:
-                _print_capture_result(capture_result)
         if poll_result.skipped:
             print("Inbound poll is not due yet")
         else:

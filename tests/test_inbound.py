@@ -1,6 +1,7 @@
 """Behavioral tests for polling Postmark inbound messages."""
 
 import json
+import sqlite3
 import sys
 import threading
 from collections.abc import Iterator
@@ -12,14 +13,17 @@ from typing import Any, ClassVar
 
 import pytest
 
+from modgud.capture import CaptureResult, capture_url
 from modgud.cli import main
-from modgud.config import SecretValue
+from modgud.config import SecretValue, get_settings
 from modgud.database import connect
 from modgud.inbound import (
+    PollResult,
     PostmarkClient,
     PostmarkError,
     pending_inbound_captures,
     poll_inbound,
+    run_inbound_poll,
 )
 
 
@@ -441,17 +445,12 @@ def test_first_plain_text_web_url_wins_when_a_message_contains_multiple_urls(
     assert target_url == "https://first.example/article"
 
 
-def test_poll_command_captures_extracted_url_with_email_origin(
+def test_inbound_run_captures_extracted_url_with_email_origin(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        (Path(__file__).parents[1] / "config.example.toml").read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
-    data_dir = tmp_path / "data"
-    monkeypatch.setenv("POSTMARK_SERVER_TOKEN", "server-token")
+    settings = get_settings(Path(__file__).parents[1] / "config.example.toml")
+    observed: list[CaptureResult] = []
 
     with serve_captured_target() as target_url:
         client = FakePostmarkClient(
@@ -465,23 +464,15 @@ def test_poll_command_captures_extracted_url_with_email_origin(
                 }
             ]
         )
-        monkeypatch.setattr("modgud.cli.PostmarkClient", lambda token: client)
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            [
-                "modgud",
-                "--config",
-                str(config_path),
-                "--data-dir",
-                str(data_dir),
-                "poll-inbound",
-            ],
+        result = run_inbound_poll(
+            tmp_path,
+            client,
+            settings,
+            now=datetime(2026, 10, 20, tzinfo=UTC),
+            on_capture=observed.append,
         )
 
-        main()
-
-    with connect(data_dir / "modgud.sqlite3") as connection:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
         item = connection.execute(
             "SELECT id, canonical_url, format, state, source FROM items"
         ).fetchone()
@@ -507,6 +498,9 @@ def test_poll_command_captures_extracted_url_with_email_origin(
     assert queued[:2] == (target_url, "curator@example.com")
     assert queued[2] is not None
     assert queued[3] == 1
+    assert result == PollResult(new_message_count=1, skipped=False)
+    assert observed == [CaptureResult(1, target_url, created=True)]
+    assert capsys.readouterr().out == ""
 
 
 def test_messages_queued_before_extraction_was_added_are_enriched(
@@ -568,6 +562,48 @@ def test_messages_queued_before_extraction_was_added_are_enriched(
     assert stored[0][3] is None
     assert stored[1][:3] == ("legacy-without-url", None, None)
     assert stored[1][3] is not None
+
+
+def test_poll_command_replays_pending_capture_when_poll_is_not_due(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        (Path(__file__).parents[1] / "config.example.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    client = FakePostmarkClient([])
+    monkeypatch.setenv("POSTMARK_SERVER_TOKEN", "server-token")
+    monkeypatch.setattr("modgud.cli.PostmarkClient", lambda token: client)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "modgud",
+            "--config",
+            str(config_path),
+            "--data-dir",
+            str(tmp_path),
+            "poll-inbound",
+        ],
+    )
+    with serve_captured_target() as target_url:
+        poll_inbound(
+            tmp_path / "modgud.sqlite3",
+            FakePostmarkClient([{"MessageID": "pending", "TextBody": target_url}]),
+            poll_interval=timedelta(minutes=2),
+            now=datetime.now(UTC),
+        )
+
+        main()
+
+    assert client.search_requests == []
+    assert capsys.readouterr().out == (
+        f"Added item 1: {target_url}\nInbound poll is not due yet\n"
+    )
+    assert pending_inbound_captures(tmp_path / "modgud.sqlite3") == ()
 
 
 def test_durable_message_cursor_prevents_reprocessing_after_restart(
@@ -790,3 +826,202 @@ def test_mismatched_message_details_do_not_advance_the_cursor(tmp_path: Path) ->
 
     assert queued_count == 0
     assert completed_count == 0
+
+
+def test_inbound_run_replays_legacy_queue_in_order_when_poll_is_skipped(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    settings = get_settings(Path(__file__).parents[1] / "config.example.toml")
+    now = datetime(2026, 10, 20, tzinfo=UTC)
+    observed: list[CaptureResult] = []
+    with serve_captured_target() as target_url:
+        with connect(database) as connection:
+            connection.execute(
+                "INSERT INTO postmark_inbound_poll_state VALUES (1, ?)",
+                (now.isoformat(),),
+            )
+            connection.executemany(
+                """
+                INSERT INTO postmark_inbound_messages (message_id, payload, queued_at)
+                VALUES (?, ?, ?)
+                """,
+                [
+                    (
+                        message_id,
+                        json.dumps({"TextBody": body}),
+                        queued_at,
+                    )
+                    for message_id, body, queued_at in [
+                        ("a-later", target_url, "2026-10-19T12:00:00Z"),
+                        ("z-earlier", target_url, "2026-10-19T11:00:00Z"),
+                        ("no-url", "A reminder without a link", "2026-10-19T10:00:00Z"),
+                    ]
+                ],
+            )
+        client = FakePostmarkClient([])
+
+        result = run_inbound_poll(
+            tmp_path, client, settings, now=now, on_capture=observed.append
+        )
+
+    assert result == PollResult(new_message_count=0, skipped=True)
+    assert client.search_requests == []
+    assert observed == [
+        CaptureResult(1, target_url, created=True),
+        CaptureResult(1, target_url, created=False),
+    ]
+    with connect(database) as connection:
+        captures = [
+            json.loads(row[0])
+            for row in connection.execute(
+                "SELECT payload FROM events WHERE type = 'captured' ORDER BY id"
+            )
+        ]
+        assert connection.execute(
+            "SELECT count(*) FROM postmark_inbound_messages WHERE processed_at IS NULL"
+        ).fetchone() == (0,)
+    assert [capture["inbound_message_id"] for capture in captures] == [
+        "z-earlier",
+        "a-later",
+    ]
+    assert [capture["origin"] for capture in captures] == [None, None]
+
+
+def test_inbound_run_does_not_replay_queue_after_poll_failure(tmp_path: Path) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    settings = get_settings(Path(__file__).parents[1] / "config.example.toml")
+    with connect(database) as connection:
+        connection.execute(
+            "INSERT INTO postmark_inbound_messages (message_id, payload) VALUES (?, ?)",
+            ("legacy", json.dumps({"TextBody": "https://example.com/pending"})),
+        )
+    observed: list[CaptureResult] = []
+
+    with pytest.raises(PostmarkError, match="after 4 attempts"):
+        run_inbound_poll(
+            tmp_path,
+            FailingDetailsClient([{"MessageID": "new-message"}]),
+            settings,
+            now=datetime(2026, 10, 20, tzinfo=UTC),
+            on_capture=observed.append,
+        )
+
+    assert observed == []
+    with connect(database) as connection:
+        assert connection.execute(
+            "SELECT message_id, target_url, processed_at FROM postmark_inbound_messages"
+        ).fetchall() == [("legacy", None, None)]
+        assert connection.execute("SELECT count(*) FROM items").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT count(*) FROM postmark_inbound_poll_state"
+        ).fetchone() == (0,)
+
+
+def test_inbound_run_keeps_progress_and_replays_after_later_capture_failure(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    settings = get_settings(Path(__file__).parents[1] / "config.example.toml")
+    now = datetime(2026, 10, 20, tzinfo=UTC)
+    observed: list[CaptureResult] = []
+    with connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_second_capture BEFORE INSERT ON events
+            WHEN NEW.type = 'captured'
+              AND json_extract(NEW.payload, '$.inbound_message_id') = 'b-fail'
+            BEGIN
+                SELECT RAISE(ABORT, 'capture write failed');
+            END
+            """
+        )
+    with serve_captured_target() as target_url:
+        client = FakePostmarkClient(
+            [
+                {"MessageID": message_id, "TextBody": target_url}
+                for message_id in ("a-first", "b-fail", "c-after")
+            ]
+        )
+
+        with pytest.raises(sqlite3.IntegrityError, match="capture write failed"):
+            run_inbound_poll(
+                tmp_path, client, settings, now=now, on_capture=observed.append
+            )
+
+        assert observed == [CaptureResult(1, target_url, created=True)]
+        with connect(database) as connection:
+            assert connection.execute(
+                "SELECT completed_at FROM postmark_inbound_poll_state"
+            ).fetchone() == (now.isoformat(),)
+            assert connection.execute(
+                """
+                SELECT message_id, item_id, processed_at IS NOT NULL
+                FROM postmark_inbound_messages ORDER BY message_id
+                """
+            ).fetchall() == [
+                ("a-first", 1, 1),
+                ("b-fail", None, 0),
+                ("c-after", None, 0),
+            ]
+            connection.execute("DROP TRIGGER fail_second_capture")
+        retry_client = FakePostmarkClient([])
+
+        result = run_inbound_poll(
+            tmp_path,
+            retry_client,
+            settings,
+            now=now + timedelta(seconds=1),
+            on_capture=observed.append,
+        )
+
+    assert result == PollResult(new_message_count=0, skipped=True)
+    assert retry_client.search_requests == []
+    assert observed == [
+        CaptureResult(1, target_url, created=True),
+        CaptureResult(1, target_url, created=False),
+        CaptureResult(1, target_url, created=False),
+    ]
+    assert pending_inbound_captures(database) == ()
+    with connect(database) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM events WHERE type = 'captured'"
+        ).fetchone() == (3,)
+
+
+def test_inbound_run_ignores_a_message_processed_during_replay(tmp_path: Path) -> None:
+    settings = get_settings(Path(__file__).parents[1] / "config.example.toml")
+    observed: list[CaptureResult] = []
+    with serve_captured_target() as target_url:
+        client = FakePostmarkClient(
+            [
+                {"MessageID": message_id, "TextBody": target_url}
+                for message_id in ("a-first", "b-processed-elsewhere")
+            ]
+        )
+
+        def receive(result: CaptureResult) -> None:
+            observed.append(result)
+            assert capture_url(
+                tmp_path,
+                target_url,
+                settings,
+                origin=None,
+                inbound_message_id="b-processed-elsewhere",
+            ) == CaptureResult(1, target_url, created=False)
+
+        result = run_inbound_poll(
+            tmp_path,
+            client,
+            settings,
+            now=datetime(2026, 10, 20, tzinfo=UTC),
+            on_capture=receive,
+        )
+
+    assert result == PollResult(new_message_count=2, skipped=False)
+    assert observed == [CaptureResult(1, target_url, created=True)]
+    assert pending_inbound_captures(tmp_path / "modgud.sqlite3") == ()
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM events WHERE type = 'captured'"
+        ).fetchone() == (2,)
