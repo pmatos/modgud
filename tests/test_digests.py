@@ -211,6 +211,46 @@ def test_selected_records_include_item_metadata_summary_and_span_map(
     )
 
 
+def test_summary_reads_preserve_stored_values_and_only_validate_selected_items(
+    event_log: sqlite3.Connection,
+) -> None:
+    with_summary = _add_item(event_log, state="failed")
+    without_summary = _add_item(event_log, state="summarized")
+    hidden = _add_item(event_log, state="captured")
+    event_log.executemany(
+        "INSERT INTO tier_1_summaries (item_id, one_liner, claims) VALUES (?, ?, ?)",
+        [
+            (with_summary, "  Stored résumé  ", json.dumps(["", "  claim  ", "café"])),
+            (hidden, "Not yet digest-visible", json.dumps(["valid", 7, None])),
+        ],
+    )
+
+    selected = select_digest_items(event_log)
+
+    assert [(item.id, item.summary) for item in selected] == [
+        (
+            with_summary,
+            Tier1Summary("  Stored résumé  ", ("", "  claim  ", "café")),
+        ),
+        (without_summary, None),
+    ]
+
+
+def test_selected_summary_rejects_non_string_claims(
+    event_log: sqlite3.Connection,
+) -> None:
+    item_id = _add_item(event_log, state="summarized")
+    event_log.execute(
+        "INSERT INTO tier_1_summaries (item_id, one_liner, claims) VALUES (?, ?, ?)",
+        (item_id, "Malformed stored claims", json.dumps(["valid", 7, None])),
+    )
+
+    with pytest.raises(
+        ValueError, match="stored tier-1 claims must be an array of strings"
+    ):
+        select_digest_items(event_log)
+
+
 def test_has_transcript_reflects_format_and_stored_transcript(
     event_log: sqlite3.Connection,
 ) -> None:

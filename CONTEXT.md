@@ -126,6 +126,17 @@ package derives source texts from an item id. What the module deliberately does
 passed in, because tier 1 and tier 2 genuinely differ — tier 2 excludes PDFs and
 tier 1 does not.
 
+## Tier-1 artifact reads
+
+A stored Tier-1 artifact is a one-liner and its ordered claims. `modgud.summaries`
+owns artifact lookup, missing-artifact handling, and stored claims decoding for
+both single-Item web reads and bulk digest reads. Bulk reads return only the
+requested artifacts that exist; unrelated malformed artifacts are not read.
+Stored strings are preserved, while non-string claims are rejected. These reads
+use the caller's connection without writing or committing. Digest eligibility
+and ordering remain with the digest module; artifact writes remain part of
+Item lifecycle.
+
 ## Model completion
 
 A chat response requested for a tier-1 artifact, a long-form summary section,

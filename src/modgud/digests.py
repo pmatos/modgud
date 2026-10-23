@@ -11,7 +11,7 @@ from modgud.config import SecretValue
 from modgud.formats import TRANSCRIPT_FORMATS, ItemFormat
 from modgud.label_tokens import create_label_token
 from modgud.span_maps import SpanMap, get_span_map
-from modgud.summaries import Tier1Summary, parse_stored_claims
+from modgud.summaries import Tier1Summary, get_tier_1_summaries
 from modgud.transcripts import format_timestamp, transcript_anchor
 
 _INLINE_ITEM_LIMIT = 10
@@ -247,17 +247,6 @@ def render_digest(
     return RenderedDigest(html="".join(html_parts), text="\n".join(text_parts))
 
 
-def _stored_summary(one_liner: object, claims_json: object) -> Tier1Summary | None:
-    if one_liner is None and claims_json is None:
-        return None
-    if one_liner is None or claims_json is None:
-        raise ValueError("stored tier-1 summary must have one-liner and claims")
-    return Tier1Summary(
-        one_liner=str(one_liner),
-        claims=parse_stored_claims(claims_json),
-    )
-
-
 def select_digest_items(connection: sqlite3.Connection) -> tuple[DigestItem, ...]:
     """Return digest-visible items captured after the last successful send."""
     rows = connection.execute(
@@ -284,13 +273,10 @@ def select_digest_items(connection: sqlite3.Connection) -> tuple[DigestItem, ...
                items.title,
                items.author,
                items.time_to_value_seconds,
-               tier_1_summaries.one_liner,
-               tier_1_summaries.claims,
                items.extracted_text_hash,
                items.page_url
         FROM qualifying_captures
         JOIN items ON items.id = qualifying_captures.item_id
-        LEFT JOIN tier_1_summaries ON tier_1_summaries.item_id = items.id
         WHERE items.state IN ('summarized', 'unsummarizable', 'failed')
         ORDER BY items.time_to_value_seconds IS NULL,
                  items.time_to_value_seconds,
@@ -298,6 +284,7 @@ def select_digest_items(connection: sqlite3.Connection) -> tuple[DigestItem, ...
                  items.id
         """
     ).fetchall()
+    summaries = get_tier_1_summaries(connection, (int(row[0]) for row in rows))
     items = []
     for row in rows:
         item_format = ItemFormat(row[2])
@@ -311,12 +298,12 @@ def select_digest_items(connection: sqlite3.Connection) -> tuple[DigestItem, ...
                 title=str(row[5]) if row[5] is not None else None,
                 author=str(row[6]) if row[6] is not None else None,
                 time_to_value_seconds=int(row[7]) if row[7] is not None else None,
-                summary=_stored_summary(row[8], row[9]),
+                summary=summaries.get(int(row[0])),
                 span_map=get_span_map(connection, int(row[0])),
                 has_transcript=(
-                    item_format in TRANSCRIPT_FORMATS and row[10] is not None
+                    item_format in TRANSCRIPT_FORMATS and row[8] is not None
                 ),
-                page_url=str(row[11]) if row[11] is not None else None,
+                page_url=str(row[9]) if row[9] is not None else None,
             )
         )
     return tuple(items)

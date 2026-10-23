@@ -1,9 +1,10 @@
 """Behavioral tests for tier-1 summary generation."""
 
 import json
+import sqlite3
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,7 +16,107 @@ from modgud.blobs import BlobStore
 from modgud.cli import main
 from modgud.config import Settings, get_settings
 from modgud.database import connect
-from modgud.summaries import Tier1Summary, summarize_item
+from modgud.summaries import (
+    Tier1Summary,
+    get_tier_1_summaries,
+    get_tier_1_summary,
+    summarize_item,
+)
+
+
+def _store_summary(connection: sqlite3.Connection, *, claims: Sequence[object]) -> int:
+    position = connection.execute("SELECT count(*) FROM items").fetchone()[0]
+    cursor = connection.execute(
+        """
+        INSERT INTO items (canonical_url, content_hash, format, state, source)
+        VALUES (?, ?, 'web', 'summarized', 'example.com')
+        """,
+        (f"https://example.com/{position}", f"content-{position}"),
+    )
+    item_id = cursor.lastrowid
+    assert item_id is not None
+    connection.execute(
+        "INSERT INTO tier_1_summaries (item_id, one_liner, claims) VALUES (?, ?, ?)",
+        (item_id, "  Stored résumé  ", json.dumps(list(claims))),
+    )
+    return item_id
+
+
+def test_bulk_reads_only_requested_summaries_without_changing_the_transaction(
+    tmp_path: Path,
+) -> None:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        first = _store_summary(connection, claims=("", "  claim  ", "café"))
+        second = _store_summary(connection, claims=("first", "second", "third"))
+        _store_summary(connection, claims=("valid", 7, None))
+        connection.execute(
+            """
+            INSERT INTO items (canonical_url, content_hash, format, state, source)
+            VALUES ('https://example.com/no-summary', 'no-summary',
+                    'web', 'summarized', 'example.com')
+            """
+        )
+        changes = connection.total_changes
+
+        summaries = get_tier_1_summaries(
+            connection, (item_id for item_id in (second, first, second, 4, 999))
+        )
+
+        assert summaries == {
+            first: Tier1Summary("  Stored résumé  ", ("", "  claim  ", "café")),
+            second: Tier1Summary("  Stored résumé  ", ("first", "second", "third")),
+        }
+        assert get_tier_1_summary(connection, first) == summaries[first]
+        assert get_tier_1_summary(connection, 4) is None
+        assert get_tier_1_summary(connection, 999) is None
+        assert get_tier_1_summaries(connection, ()) == {}
+        assert connection.total_changes == changes
+        assert connection.in_transaction
+        connection.rollback()
+        assert get_tier_1_summaries(connection, (first, second)) == {}
+
+
+@pytest.mark.parametrize("bad_claim", [7, None, {}, ["nested"]])
+def test_both_readers_reject_non_string_stored_claims(
+    tmp_path: Path, bad_claim: object
+) -> None:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_id = _store_summary(connection, claims=("valid", bad_claim, "also valid"))
+
+        for read in (
+            lambda: get_tier_1_summaries(connection, (item_id,)),
+            lambda: get_tier_1_summary(connection, item_id),
+        ):
+            with pytest.raises(
+                ValueError, match="stored tier-1 claims must be an array of strings"
+            ):
+                read()
+
+
+def test_bulk_reads_are_not_limited_by_sqlite_parameter_count(tmp_path: Path) -> None:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        item_ids = tuple(
+            _store_summary(connection, claims=("first", "second", "third"))
+            for _ in range(12)
+        )
+        connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 4)
+
+        summaries = get_tier_1_summaries(connection, item_ids)
+
+        assert set(summaries) == set(item_ids)
+        assert set(summaries.values()) == {
+            Tier1Summary("  Stored résumé  ", ("first", "second", "third"))
+        }
+
+
+def test_stored_summary_readers_propagate_database_failures(tmp_path: Path) -> None:
+    with connect(tmp_path / "modgud.sqlite3") as connection:
+        connection.execute("DROP TABLE tier_1_summaries")
+
+        with pytest.raises(sqlite3.OperationalError, match="no such table"):
+            get_tier_1_summaries(connection, (1,))
+        with pytest.raises(sqlite3.OperationalError, match="no such table"):
+            get_tier_1_summary(connection, 1)
 
 
 class _CompletionHandler(BaseHTTPRequestHandler):
