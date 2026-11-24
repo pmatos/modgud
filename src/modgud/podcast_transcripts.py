@@ -20,7 +20,7 @@ from openai import OpenAIError
 
 from modgud.blobs import BlobStore
 from modgud.config import Settings
-from modgud.database import connect
+from modgud.database import transaction
 from modgud.events import ItemLog, TranscriptSource
 from modgud.item_lifecycle import mark_extracted, mark_failed
 from modgud.models import RoutedModelClient, create_model_client
@@ -115,7 +115,7 @@ def run_podcast_transcript_batch(
     settings: Settings,
 ) -> PodcastTranscriptBatchResult:
     """Extract every captured podcast through its creator transcript first."""
-    with connect(database) as connection:
+    with transaction(database) as connection:
         pending = connection.execute(
             """
             SELECT id, content_hash, duration_seconds
@@ -199,7 +199,7 @@ def run_podcast_transcript_batch(
                 continue
 
             transcript_hash = blob_store.put(transcript)
-            with connect(database) as connection:
+            with transaction(database) as connection:
                 ItemLog(connection, int(item_id)).podcast_transcript(
                     source=transcript_source,
                     url=transcript_url,
@@ -271,7 +271,7 @@ def _download_audio(url: str) -> Iterator[Path]:
 
 
 def _record_failure(database: str | Path, item_id: int, error: str) -> None:
-    with connect(database) as connection:
+    with transaction(database) as connection:
         mark_failed(
             connection,
             item_id,

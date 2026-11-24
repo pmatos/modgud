@@ -5,7 +5,129 @@ from pathlib import Path
 
 import pytest
 
-from modgud.database import _MIGRATIONS, apply_migrations, connect
+from modgud.database import _MIGRATIONS, apply_migrations, connect, transaction
+
+
+def test_owned_transaction_initializes_commits_and_closes(tmp_path: Path) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    with transaction(database) as connection:
+        assert connection.execute("PRAGMA foreign_keys").fetchone() == (1,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (
+            len(_MIGRATIONS),
+        )
+        connection.execute(
+            """
+            INSERT INTO items (canonical_url, content_hash, format, state, source)
+            VALUES ('https://example.com/committed', 'content', 'web',
+                    'captured', 'example.com')
+            """
+        )
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        connection.execute("SELECT 1")
+    with transaction(database) as reopened:
+        assert reopened.execute("SELECT canonical_url FROM items").fetchall() == [
+            ("https://example.com/committed",)
+        ]
+
+
+@pytest.mark.parametrize(
+    "error", [RuntimeError("abort"), KeyboardInterrupt(), SystemExit(17)]
+)
+def test_owned_transaction_rolls_back_and_closes_on_body_failure(
+    tmp_path: Path, error: BaseException
+) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    with pytest.raises(type(error)) as caught, transaction(database) as connection:
+        connection.execute(
+            """
+            INSERT INTO items (canonical_url, content_hash, format, state, source)
+            VALUES ('https://example.com/aborted', 'content', 'web',
+                    'captured', 'example.com')
+            """
+        )
+        raise error
+
+    assert caught.value is error
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        connection.execute("SELECT 1")
+    with transaction(database) as reopened:
+        assert reopened.execute("SELECT count(*) FROM items").fetchone() == (0,)
+
+
+def test_owned_transaction_closes_and_rolls_back_after_commit_failure(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "modgud.sqlite3"
+    with (
+        pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"),
+        transaction(database) as connection,
+    ):
+        connection.execute(
+            """
+            CREATE TABLE deferred_references (
+                item_id INTEGER REFERENCES items(id) DEFERRABLE INITIALLY DEFERRED
+            )
+            """
+        )
+        connection.execute("INSERT INTO deferred_references VALUES (999)")
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        connection.execute("SELECT 1")
+    with transaction(database) as reopened:
+        assert reopened.execute(
+            "SELECT count(*) FROM deferred_references"
+        ).fetchone() == (0,)
+
+
+def test_owned_transaction_keeps_explicit_locking_with_the_caller(
+    tmp_path: Path,
+) -> None:
+    with transaction(tmp_path / "modgud.sqlite3") as connection:
+        assert not connection.in_transaction
+        connection.execute("BEGIN IMMEDIATE")
+        assert connection.in_transaction
+
+
+def test_owned_transaction_commits_and_closes_on_early_return(tmp_path: Path) -> None:
+    database = tmp_path / "modgud.sqlite3"
+
+    def insert_and_return() -> sqlite3.Connection:
+        with transaction(database) as connection:
+            connection.execute(
+                """
+                INSERT INTO items (canonical_url, content_hash, format, state, source)
+                VALUES ('https://example.com/returned', 'content', 'web',
+                        'captured', 'example.com')
+                """
+            )
+            return connection
+
+    closed = insert_and_return()
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        closed.execute("SELECT 1")
+    with transaction(database) as reopened:
+        assert reopened.execute("SELECT canonical_url FROM items").fetchall() == [
+            ("https://example.com/returned",)
+        ]
+
+
+def test_raw_connection_remains_reusable_after_its_transaction_block(
+    tmp_path: Path,
+) -> None:
+    connection = connect(tmp_path / "modgud.sqlite3")
+    try:
+        connection.execute("CREATE TABLE raw_values (value TEXT)")
+        with connection:
+            connection.execute("INSERT INTO raw_values VALUES ('committed')")
+        with pytest.raises(RuntimeError), connection:
+            connection.execute("INSERT INTO raw_values VALUES ('rolled back')")
+            raise RuntimeError("abort")
+
+        assert connection.execute("SELECT value FROM raw_values").fetchall() == [
+            ("committed",)
+        ]
+    finally:
+        connection.close()
 
 
 def test_opening_a_new_database_creates_the_durable_store(tmp_path: Path) -> None:

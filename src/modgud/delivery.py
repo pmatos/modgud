@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Protocol
 
 from modgud.config import SecretValue
-from modgud.database import connect
+from modgud.database import transaction
 from modgud.digests import render_digest, select_digest_items
 from modgud.events import ItemLog
 from modgud.postmark import DigestEmail, PostmarkDeliveryError, PostmarkEmailClient
@@ -48,7 +48,7 @@ def deliver_digest(
     scheduled_for: date | None = None,
 ) -> DigestDeliveryResult:
     """Send the currently eligible item set and advance its event boundary."""
-    with connect(database) as connection:
+    with transaction(database) as connection:
         connection.execute("BEGIN IMMEDIATE")
         if scheduled_for is not None:
             completed = connection.execute(

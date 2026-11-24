@@ -1,14 +1,13 @@
 """Accept signed Label links and append confirmed opinions to Item history."""
 
 from collections.abc import Callable
-from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
 from modgud.config import SecretValue
-from modgud.database import connect
+from modgud.database import transaction
 from modgud.events import ItemLog
 from modgud.label_tokens import (
     ExpiredLabelToken,
@@ -103,7 +102,7 @@ class LabelLinks:
         except InvalidLabelToken as error:
             raise LabelRejected(LabelFailure.INVALID_LINK) from error
 
-        with closing(connect(self._database)) as connection, connection:
+        with transaction(self._database) as connection:
             row = connection.execute(
                 """
                 SELECT coalesce(title, page_url, canonical_url),

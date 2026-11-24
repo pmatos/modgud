@@ -8,7 +8,7 @@ from yt_dlp.utils import DownloadError
 
 from modgud.blobs import BlobStore
 from modgud.config import Settings
-from modgud.database import connect
+from modgud.database import transaction
 from modgud.events import ItemLog
 from modgud.item_lifecycle import mark_extracted, mark_failed
 from modgud.models import create_model_client
@@ -31,7 +31,7 @@ def run_audio_fallback_batch(
     settings: Settings,
 ) -> AudioFallbackBatchResult:
     """Transcribe every captured YouTube item with refused captions."""
-    with connect(database) as connection:
+    with transaction(database) as connection:
         pending = connection.execute(
             """
             SELECT items.id, items.canonical_url
@@ -65,7 +65,7 @@ def run_audio_fallback_batch(
                         response_format="vtt",
                     )
             except (DownloadError, OpenAIError, OSError, ValueError) as error:
-                with connect(database) as connection:
+                with transaction(database) as connection:
                     ItemLog(connection, int(item_id)).audio_fallback("failed")
                     mark_failed(
                         connection,
@@ -77,7 +77,7 @@ def run_audio_fallback_batch(
                 continue
             transcript_content = transcript.encode("utf-8")
             transcript_hash = blob_store.put(transcript_content)
-            with connect(database) as connection:
+            with transaction(database) as connection:
                 ItemLog(connection, int(item_id)).audio_fallback("transcribed")
                 mark_extracted(
                     connection,

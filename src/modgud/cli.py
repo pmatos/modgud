@@ -9,7 +9,7 @@ from modgud.audio_fallbacks import run_audio_fallback_batch
 from modgud.blobs import BlobStore
 from modgud.capture import CaptureResult, capture_url
 from modgud.config import ConfigError, Settings, default_config_path, get_settings
-from modgud.database import connect
+from modgud.database import transaction
 from modgud.delivery import PostmarkEmailClient, deliver_digest
 from modgud.inbound import PostmarkClient, run_inbound_poll
 from modgud.origin_reports import render_origin_report
@@ -33,7 +33,7 @@ def _print_capture_result(result: CaptureResult) -> None:
 
 
 def _list(data_dir: Path) -> None:
-    with connect(data_dir / "modgud.sqlite3") as connection:
+    with transaction(data_dir / "modgud.sqlite3") as connection:
         items = connection.execute(
             """
             SELECT items.id, items.format, items.source, max(events.created_at)
@@ -51,13 +51,13 @@ def _list(data_dir: Path) -> None:
 
 
 def _origin_report(data_dir: Path) -> None:
-    with connect(data_dir / "modgud.sqlite3") as connection:
+    with transaction(data_dir / "modgud.sqlite3") as connection:
         report = render_origin_report(connection)
     print(report)
 
 
 def _summarize(data_dir: Path, item_id: int, settings: Settings) -> None:
-    with connect(data_dir / "modgud.sqlite3") as connection:
+    with transaction(data_dir / "modgud.sqlite3") as connection:
         summary = summarize_item(
             connection,
             BlobStore(data_dir / "blobs"),
@@ -71,13 +71,13 @@ def _summarize(data_dir: Path, item_id: int, settings: Settings) -> None:
 
 
 def _reprocess(data_dir: Path, item_id: int) -> None:
-    with connect(data_dir / "modgud.sqlite3") as connection:
+    with transaction(data_dir / "modgud.sqlite3") as connection:
         state = reprocess_item(connection, BlobStore(data_dir / "blobs"), item_id)
     print(f"Reprocessed item {item_id}: {state}")
 
 
 def _span_map(data_dir: Path, item_id: int, settings: Settings) -> None:
-    with connect(data_dir / "modgud.sqlite3") as connection:
+    with transaction(data_dir / "modgud.sqlite3") as connection:
         span_map = generate_span_map(
             connection,
             BlobStore(data_dir / "blobs"),

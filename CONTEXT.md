@@ -91,9 +91,23 @@ shape worth abstracting.
 
 An `ItemLog` is one item's slice of the event log, bound to one open
 transaction. It is the interface callers use to append events. It never opens a
-connection and never commits — the caller's `with connect(...)` block owns the
+connection and never commits — the caller's `with transaction(...)` block owns the
 transaction, and the log writes inside it, so an item's row update and the
 events describing it land or fail together.
+
+## Database transaction scope
+
+An owned database scope is `modgud.database.transaction`: it opens and migrates
+one SQLite connection, commits or rolls back when the caller's block exits,
+then closes the connection even if the block or commit fails. Production
+callers use this scope for reads and writes. Connections, cursors, and Item logs
+must not outlive it.
+
+Entering a scope does not start a transaction. Callers retain their existing
+block boundaries and explicit locking, including `BEGIN IMMEDIATE`. Inbound
+polling and each Capture still commit independently. `connect` remains the raw
+interface for callers that deliberately manage connection lifetime themselves;
+its native SQLite context commits or rolls back without closing.
 
 ## Payload encoding
 
