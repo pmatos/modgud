@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from modgud.capture import CaptureResult, capture_url
 from modgud.config import Settings
-from modgud.database import connect
+from modgud.database import transaction
 from modgud.postmark import PostmarkClient, PostmarkError
 
 __all__ = [
@@ -256,7 +256,7 @@ def pending_inbound_captures(
     database: str | Path,
 ) -> tuple[PendingInboundCapture, ...]:
     """Return extracted URLs still awaiting durable item capture."""
-    with connect(database) as connection:
+    with transaction(database) as connection:
         connection.execute("BEGIN IMMEDIATE")
         unextracted = connection.execute(
             """
@@ -317,7 +317,7 @@ def poll_inbound(
 ) -> PollResult:
     """Retrieve and queue every previously unseen inbound message."""
     new_message_count = 0
-    with connect(database) as connection:
+    with transaction(database) as connection:
         previous_poll = connection.execute(
             """
             SELECT completed_at

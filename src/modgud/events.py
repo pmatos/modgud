@@ -39,14 +39,13 @@ def _encode(fields: Mapping[str, object]) -> str:
 class ItemLog:
     """One item's slice of the event log, bound to one open transaction.
 
-    Construct this inside the ``with connect(...)`` block whose commit will
-    carry the events. It never opens a connection and never commits: the
-    caller's block owns the transaction.
+    Construct this inside the caller's transaction block, normally
+    ``with transaction(...)``. It never opens a connection and never commits:
+    the caller's block owns the transaction and closes the connection on exit.
 
-    Because a connection commits but does not close on leaving its ``with``
-    block, an ``ItemLog`` used after that block would write into a transaction
-    nobody commits, and the row would be lost without an error. So: never store
-    one on a longer-lived object, and never return one from a function.
+    Keep the log inside that block: never store one on a longer-lived object
+    or return one from a function. Callers using raw ``connect`` must also
+    respect the transaction lifetime, even though their connection stays open.
     """
 
     __slots__ = ("_connection", "item_id")

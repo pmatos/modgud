@@ -1,6 +1,8 @@
 """SQLite connection and schema migration support."""
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 _MIGRATIONS = (
@@ -21,7 +23,11 @@ _SCHEMA_VERSION = len(_MIGRATIONS)
 
 
 def connect(database: str | Path) -> sqlite3.Connection:
-    """Open a database and bring its schema up to date."""
+    """Open a migrated database; the caller owns closing the connection.
+
+    Its native context commits or rolls back without closing. Use
+    ``transaction`` for a scope that owns both lifetimes.
+    """
     connection = sqlite3.connect(database)
     connection.execute("PRAGMA foreign_keys = ON")
     try:
@@ -30,6 +36,18 @@ def connect(database: str | Path) -> sqlite3.Connection:
         connection.close()
         raise
     return connection
+
+
+@contextmanager
+def transaction(database: str | Path) -> Iterator[sqlite3.Connection]:
+    """Open a migrated connection, commit or roll back, then close.
+
+    No transaction is started on entry; callers retain explicit locking and
+    SQLite's implicit transaction behavior. The connection must stay inside
+    this scope. Transaction completion runs before closing, even on failure.
+    """
+    with closing(connect(database)) as connection, connection:
+        yield connection
 
 
 def apply_migrations(connection: sqlite3.Connection) -> None:

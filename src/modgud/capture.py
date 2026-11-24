@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 
 from modgud.blobs import BlobStore
 from modgud.config import Settings, get_settings
-from modgud.database import connect
+from modgud.database import transaction
 from modgud.events import ItemLog
 from modgud.extraction import ExtractionError, NoTextLayerError, extract_document
 from modgud.formats import DOCUMENT_FORMATS, ItemFormat, detect_format
@@ -109,7 +109,7 @@ def capture_url(
     except ValueError:
         canonical_url = url
     database = data_dir / "modgud.sqlite3"
-    with connect(database) as connection:
+    with transaction(database) as connection:
         if inbound_message_id is not None:
             connection.execute("BEGIN IMMEDIATE")
             if _inbound_was_processed(connection, inbound_message_id):
@@ -263,7 +263,7 @@ def capture_url(
     elif channel is not None:
         source = channel
 
-    with connect(database) as connection:
+    with transaction(database) as connection:
         connection.execute("BEGIN IMMEDIATE")
         if inbound_message_id is not None and _inbound_was_processed(
             connection, inbound_message_id
@@ -386,7 +386,7 @@ def capture_url(
     if item_format is ItemFormat.WEB and extracted_text_hash is not None:
         if settings is None:
             settings = get_settings()
-        with connect(database) as connection:
+        with transaction(database) as connection:
             summarize_item(
                 connection,
                 blob_store,

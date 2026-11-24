@@ -17,7 +17,7 @@ from starlette.concurrency import run_in_threadpool
 from modgud.blobs import BlobStore
 from modgud.capture import capture_url
 from modgud.config import Settings
-from modgud.database import connect
+from modgud.database import transaction
 from modgud.formats import ItemFormat
 from modgud.labels import LabelFailure, LabelLinks, LabelRejected
 from modgud.long_form_summaries import (
@@ -121,7 +121,7 @@ def create_app(
         clock=clock,
     )
 
-    with connect(database) as connection:
+    with transaction(database) as connection:
         # A generation thread cannot survive a process restart, so anything
         # still "pending" at startup was interrupted and must not hang forever.
         recover_interrupted_long_form_summaries(connection)
@@ -164,7 +164,7 @@ def create_app(
     ) -> HTMLResponse:
         active_format = item_format if item_format in _ITEM_FORMATS else None
         active_state = state if state in _ITEM_STATES else None
-        with connect(database) as connection:
+        with transaction(database) as connection:
             item_count = int(
                 connection.execute("SELECT count(*) FROM items").fetchone()[0]
             )
@@ -254,7 +254,7 @@ def create_app(
 
     @app.get("/items/{item_id}", response_class=HTMLResponse)
     def item_detail(request: Request, item_id: int) -> HTMLResponse:
-        with connect(database) as connection:
+        with transaction(database) as connection:
             item = connection.execute(
                 f"""
                 SELECT {_DISPLAY_TITLE_SQL}, {_DISPLAY_URL_SQL}, source
@@ -297,17 +297,17 @@ def create_app(
 
     def _run_long_form_summary(item_id: int, active_settings: Settings) -> None:
         try:
-            with connect(database) as connection:
+            with transaction(database) as connection:
                 generate_long_form_summary(
                     connection, blob_store, item_id, settings=active_settings
                 )
         except Exception as error:  # noqa: BLE001 - must surface, never hang pending
-            with connect(database) as connection:
+            with transaction(database) as connection:
                 fail_long_form_summary(connection, item_id, error)
 
     @app.get("/items/{item_id}/summary", response_class=HTMLResponse)
     def item_long_form_summary(request: Request, item_id: int) -> HTMLResponse:
-        with connect(database) as connection:
+        with transaction(database) as connection:
             item = connection.execute(
                 f"""
                 SELECT {_DISPLAY_TITLE_SQL}, {_DISPLAY_URL_SQL}, source,
@@ -338,7 +338,7 @@ def create_app(
 
     @app.post("/items/{item_id}/summary")
     def request_item_long_form_summary(request: Request, item_id: int) -> Response:
-        with connect(database) as connection:
+        with transaction(database) as connection:
             item = connection.execute(
                 "SELECT format, extracted_text_hash FROM items WHERE id = ?",
                 (item_id,),
